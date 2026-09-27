@@ -2,6 +2,8 @@
 
 use std::cell::RefCell;
 
+use pwmtf_protocol::{PREVIEW_MARKER, ShotPreview};
+
 use js_sys::{ArrayBuffer, Uint8Array};
 use wasm_bindgen::{JsCast as _, closure::Closure};
 use web_sys::{BinaryType, CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
@@ -11,6 +13,18 @@ use crate::transport::{BrowserTransport, ConnectionStatus};
 thread_local! {
     static SOCKET: RefCell<Option<WebSocket>> = const { RefCell::new(None) };
     static TRANSPORT: RefCell<BrowserTransport> = RefCell::new(BrowserTransport::default());
+    static REMOTE_PREVIEW: RefCell<Option<(ShotPreview, f64)>> = const { RefCell::new(None) };
+    static LAST_SENT: RefCell<Option<f64>> = const { RefCell::new(None) };
+    static LAST_RECEIVED_SEQUENCE: RefCell<Option<(u64, u32)>> = const { RefCell::new(None) };
+    static PENDING_CANCEL: RefCell<Option<(ShotPreview, f64)>> = const { RefCell::new(None) };
+    static REMOTE_LAST: RefCell<Option<(u64, u64, u32, bool)>> = const { RefCell::new(None) };
+}
+
+/// Monotonic browser clock in milliseconds; never use `std::time::Instant` on WASM.
+pub fn monotonic_millis() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map_or(0.0, |performance| performance.now())
 }
 
 /// Connects the browser socket to a server-authorized match subscription URL.
@@ -69,7 +83,83 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
             return;
         };
         let bytes = Uint8Array::new(&buffer).to_vec();
+        if bytes.first() == Some(&PREVIEW_MARKER) {
+            if let Ok(preview) = ShotPreview::from_bytes(&bytes) {
+                let eligible = TRANSPORT.with(|transport| {
+                    let transport = transport.borrow();
+                    transport.status() == ConnectionStatus::Ready
+                        && !transport.accepts_active_player_command()
+                        && !transport.has_pending_prediction()
+                        && transport.authoritative_state().is_some_and(|state| {
+                            matches!(state.status(), pwmtf_game_domain::MatchStatus::InProgress)
+                                && transport
+                                    .local_player()
+                                    .is_some_and(|seat| seat != state.active_player())
+                        })
+                        && transport.prediction().is_some_and(|prediction| {
+                            prediction.authoritative_revision() == preview.revision
+                        })
+                });
+                if eligible {
+                    let fresh = LAST_RECEIVED_SEQUENCE.with(|last| {
+                        let mut last = last.borrow_mut();
+                        if last.is_some_and(|(revision, sequence)| {
+                            revision == preview.revision && preview.sequence <= sequence
+                        }) {
+                            false
+                        } else {
+                            *last = Some((preview.revision, preview.sequence));
+                            true
+                        }
+                    });
+                    if !fresh {
+                        return;
+                    }
+                    let permitted = REMOTE_LAST.with(|last| {
+                        last.borrow()
+                            .is_none_or(|(revision, gesture, _, canceled)| {
+                                revision != preview.revision
+                                    || preview.cancel
+                                    || gesture != preview.gesture
+                                    || !canceled
+                            })
+                    });
+                    if !permitted {
+                        return;
+                    }
+                    REMOTE_LAST.with(|last| {
+                        *last.borrow_mut() = Some((
+                            preview.revision,
+                            preview.gesture,
+                            preview.sequence,
+                            preview.cancel,
+                        ))
+                    });
+                    REMOTE_PREVIEW.with(|stored| {
+                        *stored.borrow_mut() = Some((preview, monotonic_millis()));
+                    });
+                }
+            }
+            return;
+        }
+        let old_revision = TRANSPORT.with(|transport| {
+            transport
+                .borrow()
+                .prediction()
+                .map(crate::prediction::PredictionState::authoritative_revision)
+        });
         let result = TRANSPORT.with(|transport| transport.borrow_mut().receive_snapshot(&bytes));
+        let new_revision = TRANSPORT.with(|transport| {
+            transport
+                .borrow()
+                .prediction()
+                .map(crate::prediction::PredictionState::authoritative_revision)
+        });
+        if old_revision != new_revision || result.is_err() {
+            REMOTE_PREVIEW.with(|stored| *stored.borrow_mut() = None);
+            REMOTE_LAST.with(|last| *last.borrow_mut() = None);
+            LAST_RECEIVED_SEQUENCE.with(|last| *last.borrow_mut() = None);
+        }
         if result.is_err() {
             TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
             let _ = message_socket.close();
@@ -80,12 +170,16 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
 
     let on_error = Closure::<dyn FnMut(ErrorEvent)>::new(move |_| {
         TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
+        REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
+        REMOTE_LAST.with(|last| *last.borrow_mut() = None);
     });
     socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     on_error.forget();
 
     let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
         TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
+        REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
+        REMOTE_LAST.with(|last| *last.borrow_mut() = None);
         SOCKET.with(|socket| socket.borrow_mut().take());
     });
     socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
@@ -95,7 +189,121 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
     Ok(())
 }
 
-/// Sends one bounded, already-authorized command frame.
+/// Returns the current short-lived opponent planning state, if still valid.
+pub fn remote_preview() -> Option<ShotPreview> {
+    REMOTE_PREVIEW.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        let valid = TRANSPORT.with(|transport| {
+            let transport = transport.borrow();
+            transport.status() == ConnectionStatus::Ready
+                && !transport.has_pending_prediction()
+                && transport.authoritative_state().is_some_and(|state| {
+                    matches!(state.status(), pwmtf_game_domain::MatchStatus::InProgress)
+                        && transport
+                            .local_player()
+                            .is_some_and(|seat| seat != state.active_player())
+                })
+                && stored.as_ref().is_some_and(|(value, _)| {
+                    transport.prediction().is_some_and(|prediction| {
+                        prediction.authoritative_revision() == value.revision
+                    })
+                })
+        });
+        if !valid
+            || stored
+                .as_ref()
+                .is_some_and(|(_, at)| monotonic_millis() - *at > 650.0)
+        {
+            *stored = None;
+        }
+        stored
+            .as_ref()
+            .and_then(|(value, _)| (!value.cancel).then_some(*value))
+    })
+}
+
+/// Sends one locally quantized, non-authoritative planning update.
+///
+/// # Errors
+/// Returns a JavaScript exception if the socket is unavailable.
+pub fn send_preview(value: ShotPreview) -> Result<(), wasm_bindgen::JsValue> {
+    let ready = TRANSPORT.with(|transport| transport.borrow().accepts_active_player_command());
+    if !ready {
+        return Err(wasm_bindgen::JsValue::from_str(
+            "shot preview is not permitted",
+        ));
+    }
+    if !value.cancel {
+        PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+    }
+    let frame = value.to_bytes();
+    send_command(&frame)?;
+    LAST_SENT.with(|sent| *sent.borrow_mut() = Some(monotonic_millis()));
+    if value.cancel {
+        PENDING_CANCEL.with(|pending| *pending.borrow_mut() = Some((value, monotonic_millis())));
+    }
+    Ok(())
+}
+
+/// Repeats the latest preview at a bounded cadence so an idle drag stays visible.
+///
+/// # Errors
+/// Returns a JavaScript exception if the socket cannot send the frame.
+pub fn resend_preview(value: ShotPreview) -> Result<bool, wasm_bindgen::JsValue> {
+    if !TRANSPORT.with(|transport| transport.borrow().accepts_active_player_command()) {
+        return Ok(false);
+    }
+    let should_send = LAST_SENT.with(|sent| {
+        sent.borrow()
+            .is_none_or(|at| monotonic_millis() - at >= 45.0)
+    });
+    if !should_send {
+        return Ok(false);
+    }
+    send_command(&value.to_bytes())?;
+    LAST_SENT.with(|sent| *sent.borrow_mut() = Some(monotonic_millis()));
+    Ok(true)
+}
+
+/// Retransmits a cancel briefly to overcome packet loss, then expires.
+/// Returns the transmitted sequence so the next gesture cannot reuse it.
+pub fn retry_pending_cancel() -> Option<u32> {
+    let cancel = PENDING_CANCEL.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending
+            .as_ref()
+            .is_some_and(|(_, started)| monotonic_millis() - *started > 600.0)
+        {
+            *pending = None;
+            return None;
+        }
+        if pending.as_ref().is_some_and(|_| {
+            LAST_SENT.with(|sent| {
+                sent.borrow()
+                    .is_some_and(|at| monotonic_millis() - at > 65.0)
+            })
+        }) {
+            pending.take()
+        } else {
+            None
+        }
+    });
+    if let Some((mut cancel, started)) = cancel {
+        cancel.sequence = cancel.sequence.saturating_add(1);
+        if send_preview(cancel).is_ok() {
+            PENDING_CANCEL.with(|pending| *pending.borrow_mut() = Some((cancel, started)));
+            return Some(cancel.sequence);
+        }
+    }
+    None
+}
+
+/// Drops a canceled preview when a durable shot supersedes it.
+pub fn forget_pending_cancel() {
+    PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+}
+
+/// Sends one bounded, already-authorized frame.
 ///
 /// # Errors
 ///
@@ -162,6 +370,8 @@ pub fn predict_and_send_shot(
                 .map(pwmtf_protocol::CommandEnvelope::to_bytes)
         })
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+    PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+    LAST_SENT.with(|sent| *sent.borrow_mut() = None);
     send_predicted_frame(&frame)
 }
 
@@ -198,6 +408,11 @@ pub fn disconnect() {
         }
     });
     TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
+    REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
+    PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+    REMOTE_LAST.with(|last| *last.borrow_mut() = None);
+    LAST_RECEIVED_SEQUENCE.with(|last| *last.borrow_mut() = None);
+    LAST_SENT.with(|sent| *sent.borrow_mut() = None);
 }
 
 /// Returns whether presentation has one unresolved predicted command.

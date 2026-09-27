@@ -62,6 +62,12 @@ impl BrowserTransport {
         self.prediction.as_ref().map(PredictionState::authoritative)
     }
 
+    /// Returns the authenticated local seat, if established by the browser session.
+    #[must_use]
+    pub const fn local_player(&self) -> Option<pwmtf_game_domain::Player> {
+        self.local_player
+    }
+
     /// Returns whether one authoritative revision has already been ingested.
     #[must_use]
     pub fn has_revision(&self, revision: u64) -> bool {

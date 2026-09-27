@@ -84,7 +84,7 @@ fn first_hit(
     (distance, target)
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn draw(
     mut gizmos: Gizmos,
     presentation: Res<CanonicalPresentation>,
@@ -92,9 +92,34 @@ pub fn draw(
     sandbox: Res<Sandbox>,
     mut exact: ResMut<crate::exact_preview::ExactPreview>,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    let remote = if !sandbox.enabled {
+        crate::browser_transport::remote_preview()
+    } else {
+        None
+    };
+    #[cfg(target_arch = "wasm32")]
+    let mut preview_input = crate::PrototypeInput::default();
+    #[cfg(target_arch = "wasm32")]
+    let input = if let Some(preview) = remote {
+        preview_input.aim_angle = f32::from(preview.aim.steps()) * std::f32::consts::TAU
+            / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN);
+        preview_input.power =
+            f32::from(preview.power.units()) / f32::from(pwmtf_game_domain::ShotPower::MAX);
+        preview_input.spin = Vec2::new(
+            f32::from(preview.spin.side) / 10_000.0,
+            f32::from(preview.spin.vertical) / 10_000.0,
+        );
+        &preview_input
+    } else {
+        &*input
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let input = &*input;
     let enabled = sandbox.enabled && !sandbox.moving;
     #[cfg(target_arch = "wasm32")]
-    let enabled = enabled || crate::browser_transport::accepts_active_player_command();
+    let enabled =
+        enabled || crate::browser_transport::accepts_active_player_command() || remote.is_some();
     if !enabled {
         return;
     }
@@ -126,7 +151,7 @@ pub fn draw(
                 table,
                 physics,
                 geometry,
-                crate::practice_shot(&input),
+                crate::practice_shot(input),
                 mode == 1,
             );
         }

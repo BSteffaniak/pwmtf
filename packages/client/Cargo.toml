@@ -34,6 +34,7 @@ web-sys = { workspace = true, features = [
     "ErrorEvent",
     "Event",
     "MessageEvent",
+    "Performance",
     "WebSocket",
     "Window",
 ] }

@@ -61,6 +61,7 @@ const PERMISSIONS_POLICY: &str = "camera=(), geolocation=(), microphone=()";
 const SNAPSHOT_CHANNEL_CAPACITY: usize = 256;
 const READINESS_MAX_AGE_MS: u64 = 5_000;
 type PublishedSnapshot = (MatchId, SnapshotEnvelope);
+type PublishedPreview = (MatchId, AccountId, pwmtf_protocol::ShotPreview);
 
 /// Runtime services required by native HTTP/OIDC/WebSocket entry points.
 pub struct HttpState {
@@ -72,6 +73,7 @@ pub struct HttpState {
     development_login: bool,
     subscriptions: Mutex<SubscriptionRegistry>,
     snapshot_sender: tokio::sync::broadcast::Sender<PublishedSnapshot>,
+    preview_sender: tokio::sync::broadcast::Sender<PublishedPreview>,
     matches: Mutex<MatchService<SwitchyCommandJournal>>,
     scheduler_healthy: AtomicBool,
     scheduler_last_success_ms: AtomicU64,
@@ -332,6 +334,7 @@ impl HttpState {
     pub fn development(db: Arc<dyn Database>, origin: &str) -> Self {
         let matches = MatchService::new(SwitchyCommandJournal::new(Arc::clone(&db)));
         let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
+        let (preview_sender, _) = tokio::sync::broadcast::channel(32);
         Self {
             db,
             oidc: None,
@@ -341,6 +344,7 @@ impl HttpState {
             development_login: true,
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
+            preview_sender,
             matches: Mutex::new(matches),
             scheduler_healthy: AtomicBool::new(false),
             scheduler_last_success_ms: AtomicU64::new(0),
@@ -357,6 +361,7 @@ impl HttpState {
     ) -> Self {
         let matches = MatchService::new(SwitchyCommandJournal::new(Arc::clone(&db)));
         let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
+        let (preview_sender, _) = tokio::sync::broadcast::channel(32);
         Self {
             db,
             oidc: Some(oidc),
@@ -366,6 +371,7 @@ impl HttpState {
             development_login: false,
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
+            preview_sender,
             matches: Mutex::new(matches),
             scheduler_healthy: AtomicBool::new(false),
             scheduler_last_success_ms: AtomicU64::new(0),
@@ -398,6 +404,7 @@ impl HttpState {
         matches: MatchService<SwitchyCommandJournal>,
     ) -> Self {
         let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
+        let (preview_sender, _) = tokio::sync::broadcast::channel(32);
         Self {
             db,
             oidc: Some(oidc),
@@ -407,6 +414,7 @@ impl HttpState {
             development_login: false,
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
+            preview_sender,
             matches: Mutex::new(matches),
             scheduler_healthy: AtomicBool::new(false),
             scheduler_last_success_ms: AtomicU64::new(0),
@@ -818,6 +826,7 @@ async fn websocket(
         subscriptions.subscribe(connection, match_id, participants)?;
     }
     let publication = state.snapshot_sender.subscribe();
+    let previews = state.preview_sender.subscribe();
     let snapshot = state
         .matches
         .lock()
@@ -836,6 +845,7 @@ async fn websocket(
                 account,
                 snapshot,
                 publication,
+                previews,
             )
         })
         .into_response())
@@ -890,6 +900,7 @@ async fn forward_publication(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn websocket_loop(
     state: Arc<HttpState>,
     mut socket: WebSocket,
@@ -898,11 +909,33 @@ async fn websocket_loop(
     account: AccountId,
     initial_snapshot: SnapshotEnvelope,
     mut publication: tokio::sync::broadcast::Receiver<PublishedSnapshot>,
+    mut previews: tokio::sync::broadcast::Receiver<PublishedPreview>,
 ) {
     let mut negotiated = false;
     let mut delivered_revision = initial_snapshot.revision;
+    let mut last_preview: Option<(std::time::Instant, bool)> = None;
+    let mut preview_order: Option<(u64, u64, u32)> = None;
+    let mut outbound_order: Option<(u64, u32)> = None;
     loop {
         tokio::select! {
+            preview = previews.recv(), if negotiated => {
+                if let Ok((preview_match, sender, value)) = preview
+                    && preview_match == match_id && sender != account {
+                        let matches = state.matches.lock().await;
+                        let valid = matches.match_state(match_id).is_some_and(|(revision, match_state)| {
+                            revision == value.revision
+                                && matches.participants(match_id).and_then(|participants| participants.player_for(account)).is_some_and(|player| player != match_state.active_player())
+                                && matches!(match_state.status(), pwmtf_game_domain::MatchStatus::InProgress)
+                                && matches.deadline(match_id).is_some_and(|deadline| deadline.due_at.value() > unix_millis().unwrap_or(u64::MAX))
+                        });
+                        drop(matches);
+                        if valid && state.subscriptions.lock().await.is_subscribed(connection, match_id)
+                            && outbound_order.is_none_or(|(revision, sequence)| revision != value.revision || value.sequence > sequence) {
+                            outbound_order = Some((value.revision, value.sequence));
+                            if socket.send(Message::Binary(value.to_bytes().to_vec().into())).await.is_err() { break; }
+                        }
+                }
+            }
             published = publication.recv(), if negotiated => {
                 if !forward_publication(
                     &state,
@@ -945,6 +978,27 @@ async fn websocket_loop(
                             break;
                         }
                         negotiated = true;
+                    }
+                    Ok(Message::Binary(bytes)) if negotiated && bytes.first() == Some(&pwmtf_protocol::PREVIEW_MARKER) => {
+                        if let Ok(preview) = pwmtf_protocol::ShotPreview::from_bytes(&bytes) {
+                            let now = std::time::Instant::now();
+                            if last_preview.is_none_or(|(at, canceled)| now.duration_since(at) >= Duration::from_millis(40) || preview.cancel && !canceled) {
+                                let matches = state.matches.lock().await;
+                                let valid = matches.match_state(match_id).is_some_and(|(revision, match_state)| {
+                                    revision == preview.revision
+                                        && matches.participants(match_id).and_then(|participants| participants.player_for(account)).is_some_and(|player| player == match_state.active_player())
+                                        && matches!(match_state.status(), pwmtf_game_domain::MatchStatus::InProgress)
+                                        && matches.deadline(match_id).is_some_and(|deadline| deadline.due_at.value() > unix_millis().unwrap_or(u64::MAX))
+                                });
+                                drop(matches);
+                                if valid && state.subscriptions.lock().await.is_subscribed(connection, match_id)
+                                    && preview_order.is_none_or(|(revision, _, sequence)| revision != preview.revision || preview.sequence > sequence) {
+                                    last_preview = Some((now, preview.cancel));
+                                    preview_order = Some((preview.revision, preview.gesture, preview.sequence));
+                                    let _ = state.preview_sender.send((match_id, account, preview));
+                                }
+                            }
+                        }
                     }
                     Ok(Message::Binary(bytes)) if negotiated && bytes.len() <= MAX_FRAME_BYTES => {
                         match apply_transport_command(&state, match_id, account, &bytes).await {

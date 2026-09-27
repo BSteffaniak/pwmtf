@@ -11,6 +11,95 @@ use thiserror::Error;
 
 /// Current transport protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
+/// Ephemeral preview payload version, independent of durable command negotiation.
+pub const PREVIEW_VERSION: u16 = 2;
+/// Ephemeral shot-planning frame marker, disjoint from version-one commands and snapshots.
+pub const PREVIEW_MARKER: u8 = 0xff;
+/// Fixed maximum preview frame size.
+pub const MAX_PREVIEW_FRAME_BYTES: usize = 32;
+
+/// Temporary, non-authoritative aiming/power presentation. Never a match command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShotPreview {
+    /// Canonical match revision for which this planning gesture is valid.
+    pub revision: u64,
+    /// Fresh random gesture identity; prevents a prior gesture from reappearing.
+    pub gesture: u64,
+    /// Monotonic update number within one match revision (also spans gestures).
+    pub sequence: u32,
+    /// Canonically quantized aim (ignored on cancel).
+    pub aim: Aim,
+    /// Canonically quantized power (ignored on cancel).
+    pub power: ShotPower,
+    /// Canonically quantized cue-ball contact point for the remote exact guide.
+    pub spin: Spin,
+    /// Whether to clear the previous preview rather than show this one.
+    pub cancel: bool,
+}
+
+impl ShotPreview {
+    /// Encodes the fixed-size, versioned preview independently of durable commands.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; MAX_PREVIEW_FRAME_BYTES] {
+        let mut bytes = [0_u8; MAX_PREVIEW_FRAME_BYTES];
+        bytes[0] = PREVIEW_MARKER;
+        bytes[1..3].copy_from_slice(&PREVIEW_VERSION.to_be_bytes());
+        bytes[3..11].copy_from_slice(&self.revision.to_be_bytes());
+        bytes[11..19].copy_from_slice(&self.gesture.to_be_bytes());
+        bytes[19..23].copy_from_slice(&self.sequence.to_be_bytes());
+        bytes[23..25].copy_from_slice(&self.aim.steps().to_be_bytes());
+        bytes[25..27].copy_from_slice(&self.power.units().to_be_bytes());
+        bytes[27] = u8::from(self.cancel);
+        bytes[28..30].copy_from_slice(&self.spin.side.to_be_bytes());
+        bytes[30..32].copy_from_slice(&self.spin.vertical.to_be_bytes());
+        bytes
+    }
+
+    /// Decodes a bounded preview; rejects versions, malformed values and reserved bytes.
+    ///
+    /// # Errors
+    /// Returns [`ProtocolError`] for malformed, unsupported or out-of-range frames.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != MAX_PREVIEW_FRAME_BYTES || bytes.first() != Some(&PREVIEW_MARKER) {
+            return Err(ProtocolError::InvalidPreview);
+        }
+        let version = u16::from_be_bytes([bytes[1], bytes[2]]);
+        if version != PREVIEW_VERSION {
+            return Err(ProtocolError::UnsupportedProtocol(version));
+        }
+        if bytes[27] > 1 {
+            return Err(ProtocolError::InvalidPreview);
+        }
+        Ok(Self {
+            revision: u64::from_be_bytes(
+                bytes[3..11]
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidPreview)?,
+            ),
+            gesture: u64::from_be_bytes(
+                bytes[11..19]
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidPreview)?,
+            ),
+            sequence: u32::from_be_bytes(
+                bytes[19..23]
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidPreview)?,
+            ),
+            aim: Aim::new(u16::from_be_bytes([bytes[23], bytes[24]]))
+                .map_err(|_| ProtocolError::InvalidPreview)?,
+            power: ShotPower::new(u16::from_be_bytes([bytes[25], bytes[26]]))
+                .map_err(|_| ProtocolError::InvalidPreview)?,
+            spin: Spin::new(
+                i16::from_be_bytes([bytes[28], bytes[29]]),
+                i16::from_be_bytes([bytes[30], bytes[31]]),
+            )
+            .map_err(|_| ProtocolError::InvalidPreview)?,
+            cancel: bytes[27] == 1,
+        })
+    }
+}
+
 /// Maximum number of protocol versions offered during negotiation.
 pub const MAX_NEGOTIATED_VERSIONS: usize = 8;
 /// Maximum accepted wire frame size.
@@ -223,6 +312,9 @@ pub const MAX_SNAPSHOT_FRAME_BYTES: usize = MAX_SNAPSHOT_BYTES + 22;
 /// Protocol decoding failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ProtocolError {
+    /// Invalid ephemeral preview wire representation.
+    #[error("invalid shot preview")]
+    InvalidPreview,
     /// Frame exceeds the fixed wire bound.
     #[error("frame size {0} exceeds {MAX_FRAME_BYTES} bytes")]
     FrameTooLarge(usize),
@@ -429,6 +521,44 @@ mod tests {
     use pwmtf_game_domain::{Player, VersionedMatchCommand};
 
     use super::*;
+
+    #[test]
+    fn preview_wire_is_bounded_and_distinct_from_commands_and_snapshots() {
+        let value = ShotPreview {
+            revision: 42,
+            gesture: 9,
+            sequence: 3,
+            aim: Aim::new(120).unwrap(),
+            power: ShotPower::new(777).unwrap(),
+            spin: Spin::new(1_200, -2_300).unwrap(),
+            cancel: false,
+        };
+        let bytes = value.to_bytes();
+        assert_eq!(ShotPreview::from_bytes(&bytes).unwrap(), value);
+        assert!(CommandEnvelope::from_bytes(&bytes).is_err());
+        assert!(SnapshotEnvelope::from_bytes(&bytes).is_err());
+        for malformed in [&bytes[..31], &bytes[..0]] {
+            assert!(ShotPreview::from_bytes(malformed).is_err());
+        }
+        let mut corrupt = bytes;
+        corrupt[2] = 3;
+        assert!(matches!(
+            ShotPreview::from_bytes(&corrupt),
+            Err(ProtocolError::UnsupportedProtocol(_))
+        ));
+        corrupt = bytes;
+        corrupt[28..30].copy_from_slice(&i16::MAX.to_be_bytes());
+        assert!(ShotPreview::from_bytes(&corrupt).is_err());
+        corrupt = bytes;
+        corrupt[30..32].copy_from_slice(&i16::MAX.to_be_bytes());
+        assert!(ShotPreview::from_bytes(&corrupt).is_err());
+        corrupt = bytes;
+        corrupt[27] = 2;
+        assert!(ShotPreview::from_bytes(&corrupt).is_err());
+        corrupt = bytes;
+        corrupt[23..25].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(ShotPreview::from_bytes(&corrupt).is_err());
+    }
 
     fn command(command: MatchCommand) -> CommandEnvelope {
         CommandEnvelope::new(

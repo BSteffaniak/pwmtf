@@ -51,8 +51,10 @@ pub fn set_cue_spin(side: i32, vertical: i32) {
     );
 }
 
-const MIN_POWER: f32 = 0.05;
-const DEFAULT_POWER: f32 = 0.55;
+const DRAG_DEAD_ZONE: f32 = 20.0;
+const DRAG_START_RADIUS: f32 = 70.0;
+const DRAG_FULL_POWER: f32 = 180.0;
+const DEFAULT_POWER: f32 = 0.0;
 const MINIMUM_VIEWPORT_WIDTH: f32 = 1.0;
 
 #[derive(Component)]
@@ -100,6 +102,24 @@ struct PrototypeInput {
     placement_sent_during_contact: bool,
     active_touch: Option<u64>,
     pointer_contact: PointerContact,
+    drag_origin: Option<Vec2>,
+    interrupted: bool,
+    #[cfg(target_arch = "wasm32")]
+    preview_gesture: u64,
+    #[cfg(target_arch = "wasm32")]
+    preview_sequence: u32,
+    #[cfg(target_arch = "wasm32")]
+    preview_revision: u64,
+    #[cfg(target_arch = "wasm32")]
+    preview_active: bool,
+    #[cfg(target_arch = "wasm32")]
+    preview_cancel_pending: bool,
+    #[cfg(target_arch = "wasm32")]
+    preview_last_sent_power: u16,
+    #[cfg(target_arch = "wasm32")]
+    preview_last_sent_aim: u16,
+    #[cfg(target_arch = "wasm32")]
+    preview_last_sent_at: Option<f64>,
     touch_rearm_blocked: bool,
 }
 
@@ -108,7 +128,6 @@ enum PointerContact {
     #[default]
     None,
     Aim,
-    Power,
     #[cfg(target_arch = "wasm32")]
     Auxiliary,
 }
@@ -116,6 +135,15 @@ enum PointerContact {
 impl PrototypeInput {
     const fn release_active_touch(&mut self, another_touch_is_pressed: bool) {
         self.active_touch = None;
+        self.pointer_contact = PointerContact::None;
+        self.drag_origin = None;
+        self.power = 0.0;
+        self.interrupted = another_touch_is_pressed;
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.preview_active = false;
+            self.preview_cancel_pending = false;
+        }
         self.touch_rearm_blocked = another_touch_is_pressed;
     }
 
@@ -139,6 +167,24 @@ impl Default for PrototypeInput {
             placement_sent_during_contact: false,
             active_touch: None,
             pointer_contact: PointerContact::None,
+            drag_origin: None,
+            interrupted: false,
+            #[cfg(target_arch = "wasm32")]
+            preview_gesture: 0,
+            #[cfg(target_arch = "wasm32")]
+            preview_sequence: 0,
+            #[cfg(target_arch = "wasm32")]
+            preview_revision: 0,
+            #[cfg(target_arch = "wasm32")]
+            preview_active: false,
+            #[cfg(target_arch = "wasm32")]
+            preview_cancel_pending: false,
+            #[cfg(target_arch = "wasm32")]
+            preview_last_sent_power: 0,
+            #[cfg(target_arch = "wasm32")]
+            preview_last_sent_aim: 0,
+            #[cfg(target_arch = "wasm32")]
+            preview_last_sent_at: None,
             touch_rearm_blocked: false,
         }
     }
@@ -444,7 +490,7 @@ fn update_sandbox(
         if sandbox.moving {
             "Practice · balls rolling…"
         } else {
-            "Practice · drag to aim, release to shoot · power on the right"
+            "Practice · drag back to aim and power · release to shoot"
         }
         .into(),
     );
@@ -752,15 +798,28 @@ fn update_match_control_visibility(
     presentation: Res<CanonicalPresentation>,
     mut controls: Query<&mut Visibility, With<MatchControlChrome>>,
 ) {
+    #[cfg(not(target_arch = "wasm32"))]
     if !presentation.is_changed() {
         return;
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = presentation;
     #[cfg(target_arch = "wasm32")]
     let local_may_act =
         (sandbox.enabled && !sandbox.moving) || browser_transport::accepts_active_player_command();
     #[cfg(not(target_arch = "wasm32"))]
     let local_may_act = sandbox.enabled && !sandbox.moving;
-    let visibility = if local_may_act {
+    let remote_visible = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            browser_transport::remote_preview().is_some()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    };
+    let visibility = if local_may_act || remote_visible {
         Visibility::Inherited
     } else {
         Visibility::Hidden
@@ -854,7 +913,14 @@ fn input_position(
         if let Some(touch) = touches.get_pressed(id) {
             return Some(touch.position());
         }
-        input.release_active_touch(touches.iter().next().is_some() || mouse_is_pressed);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if input.preview_last_sent_power > 0 {
+                publish_gesture(input, true);
+            }
+        }
+        input.release_active_touch(true);
+        return None;
     }
 
     if input.touch_rearm_blocked {
@@ -874,22 +940,41 @@ fn pointer_world(cursor: Vec2, size: Vec2) -> Vec2 {
     Vec2::new(cursor.x - size.x / 2.0, size.y / 2.0 - cursor.y) / scale
 }
 
-fn power_contact(cursor: Vec2, size: Vec2) -> bool {
-    let point = pointer_world(cursor, size);
-    (point.x - 565.0).abs() <= 42.0 && point.y.abs() <= POWER_BAR_HEIGHT / 2.0 + 20.0
+fn starts_near_cue_ball(cursor: Vec2, size: Vec2, cue_ball: Vec2) -> bool {
+    (pointer_world(cursor, size) - cue_ball).length_squared()
+        <= DRAG_START_RADIUS * DRAG_START_RADIUS
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(clippy::missing_const_for_fn))]
 fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
-    if power_contact(cursor, window_size) {
-        return PointerContact::Power;
-    }
     #[cfg(target_arch = "wasm32")]
     {
         if selected_pocket(cursor, window_size).is_some() {
             return PointerContact::Auxiliary;
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (cursor, window_size);
     PointerContact::Aim
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn update_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
+    let Some(origin) = input.drag_origin else {
+        return;
+    };
+    let displacement = pointer_world(cursor, size) - origin;
+    if !displacement.is_finite() {
+        input.power = 0.0;
+        return;
+    }
+    let distance = displacement.length();
+    if distance > DRAG_DEAD_ZONE {
+        // Pull the cue away from the target; the ball travels in the opposite direction.
+        input.aim_angle = (-displacement).to_angle();
+    }
+    input.power =
+        ((distance - DRAG_DEAD_ZONE) / (DRAG_FULL_POWER - DRAG_DEAD_ZONE)).clamp(0.0, 1.0);
 }
 
 #[allow(clippy::needless_pass_by_ref_mut)]
@@ -904,32 +989,25 @@ fn update_from_pointer(
     if window_size.min_element() <= 0.0 {
         return;
     }
-
-    if input.pointer_contact == PointerContact::Power {
-        input.power =
-            (pointer_world(cursor, window_size).y / POWER_BAR_HEIGHT + 0.5).clamp(MIN_POWER, 1.0);
-    } else {
-        #[cfg(target_arch = "wasm32")]
+    #[cfg(target_arch = "wasm32")]
+    {
+        if input.placing_cue_ball
+            && let Some(position) = screen_to_canonical(cursor, window_size)
         {
-            if input.placing_cue_ball
-                && let Some(position) = screen_to_canonical(cursor, window_size)
-            {
-                if send_cue_ball_placement(position.x.micros(), position.y.micros()).is_ok() {
-                    *placement_sent_during_contact = true;
-                }
-                return;
+            if send_cue_ball_placement(position.x.micros(), position.y.micros()).is_ok() {
+                *placement_sent_during_contact = true;
             }
-            if input.pointer_contact == PointerContact::Auxiliary
-                && let Some(pocket) = selected_pocket(cursor, window_size)
-            {
-                input.called_pocket = Some(pocket);
-                return;
-            }
+            return;
         }
-        let centered = cursor - window_size / 2.0;
-        if centered.length_squared() > 16.0 {
-            input.aim_angle = (-centered.y).atan2(centered.x);
+        if input.pointer_contact == PointerContact::Auxiliary
+            && let Some(pocket) = selected_pocket(cursor, window_size)
+        {
+            input.called_pocket = Some(pocket);
+            return;
         }
+    }
+    if input.pointer_contact == PointerContact::Aim && input.drag_origin.is_some() {
+        update_drag(input, cursor, window_size);
     }
 }
 
@@ -1003,11 +1081,21 @@ fn cancel_input_on_focus_loss(
     mut input: ResMut<PrototypeInput>,
 ) {
     if focus_events.read().any(|event| !event.focused) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if input.preview_last_sent_power > 0 {
+                publish_gesture(&mut input, true);
+            }
+        }
         input.release_active_touch(true);
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+fn touch_release_is_intentional(active_touch: Option<u64>, touches: &Touches) -> bool {
+    active_touch.is_none_or(|id| touches.just_released(id))
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn update_input(
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -1018,73 +1106,230 @@ fn update_input(
     presentation: Res<CanonicalPresentation>,
 ) {
     let mouse_is_pressed = mouse.pressed(MouseButton::Left);
+    #[cfg(target_arch = "wasm32")]
+    if let Some(sequence) = browser_transport::retry_pending_cancel() {
+        input.preview_sequence = input.preview_sequence.max(sequence.saturating_add(1));
+    }
     let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
     #[cfg(target_arch = "wasm32")]
     if !(browser_transport::accepts_active_player_command() || sandbox.enabled && !sandbox.moving) {
-        if any_pressed {
-            input.release_active_touch(true);
+        if input.preview_active && input.preview_last_sent_power > 0 {
+            publish_gesture(&mut input, true);
+        }
+        if any_pressed || input.drag_origin.is_some() {
+            input.release_active_touch(any_pressed);
+        }
+        if !any_pressed && input.interrupted {
+            input.interrupted = false;
+            input.rearm_touch_input();
         }
         *was_pressed = any_pressed;
         return;
     }
     if sandbox.enabled && sandbox.moving {
+        if input.drag_origin.is_some() {
+            input.release_active_touch(any_pressed);
+        }
+        if !any_pressed && input.interrupted {
+            input.interrupted = false;
+            input.rearm_touch_input();
+        }
         *was_pressed = any_pressed;
         return;
     }
     let started_contact = !*was_pressed && any_pressed;
     if *was_pressed && !any_pressed {
-        if sandbox.enabled && input.pointer_contact == PointerContact::Aim {
+        // A touch canceled by the browser is not a release-to-shoot. Bevy removes
+        // both released and canceled contacts from `pressed` before this update.
+        if !touch_release_is_intentional(input.active_touch, &touches) {
+            #[cfg(target_arch = "wasm32")]
+            if input.preview_last_sent_power > 0 {
+                publish_gesture(&mut input, true);
+            }
+            input.release_active_touch(true);
+            *was_pressed = false;
+            return;
+        }
+        let charged = input.pointer_contact == PointerContact::Aim
+            && input.drag_origin.is_some()
+            && input.power > 0.0
+            && !input.touch_rearm_blocked;
+        if sandbox.enabled && charged {
             sandbox.shoot(practice_shot(&input));
         }
         #[cfg(target_arch = "wasm32")]
-        {
-            if !sandbox.enabled
-                && input.pointer_contact == PointerContact::Aim
+        if !sandbox.enabled {
+            let shot_eligible = charged
+                && input.preview_active
                 && !input.placement_sent_during_contact
-            {
-                let _ = release_shot(&input);
+                && browser_transport::accepts_active_player_command()
+                && browser_transport::authoritative_revision() == Some(input.preview_revision);
+            if input.preview_active && input.preview_last_sent_power > 0 {
+                publish_gesture(&mut input, true);
             }
+            if shot_eligible && release_shot(&input).is_ok() {
+                browser_transport::forget_pending_cancel();
+            }
+        }
+        input.release_active_touch(false);
+        #[cfg(target_arch = "wasm32")]
+        {
             input.placement_sent_during_contact = false;
         }
-        input.pointer_contact = PointerContact::None;
     }
     *was_pressed = any_pressed;
     if !any_pressed {
-        input.active_touch = None;
+        if input.interrupted {
+            input.interrupted = false;
+            input.rearm_touch_input();
+        }
         return;
     }
-
+    if touches.iter().count() > 1 || (mouse_is_pressed && touches.iter().next().is_some()) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if input.preview_last_sent_power > 0 {
+                publish_gesture(&mut input, true);
+            }
+        }
+        input.release_active_touch(true);
+        return;
+    }
     let Some(cursor) = input_position(&window, mouse_is_pressed, &touches, &mut input) else {
         return;
     };
-    if started_contact {
+    if input.touch_rearm_blocked {
+        return;
+    }
+    if started_contact && !input.interrupted {
         input.pointer_contact =
             classify_pointer_contact(cursor, Vec2::new(window.width(), window.height()));
+        if input.pointer_contact == PointerContact::Aim {
+            #[cfg(target_arch = "wasm32")]
+            let can_drag = !input.placing_cue_ball
+                && presentation.target.get(&0).is_some_and(|cue_ball| {
+                    starts_near_cue_ball(
+                        cursor,
+                        Vec2::new(window.width(), window.height()),
+                        *cue_ball,
+                    )
+                });
+            #[cfg(not(target_arch = "wasm32"))]
+            let can_drag = presentation.target.get(&0).is_some_and(|cue_ball| {
+                starts_near_cue_ball(
+                    cursor,
+                    Vec2::new(window.width(), window.height()),
+                    *cue_ball,
+                )
+            });
+            if can_drag {
+                input.drag_origin = Some(pointer_world(
+                    cursor,
+                    Vec2::new(window.width(), window.height()),
+                ));
+                input.power = 0.0;
+                #[cfg(target_arch = "wasm32")]
+                if !sandbox.enabled {
+                    if let Some(revision) = browser_transport::authoritative_revision() {
+                        if let Ok(id) = random_command_id() {
+                            if input.preview_revision != revision {
+                                input.preview_sequence = 0;
+                            }
+                            input.preview_revision = revision;
+                            input.preview_gesture =
+                                u64::from_be_bytes(id.bytes()[..8].try_into().unwrap_or_default());
+                            input.preview_active = true;
+                            input.preview_cancel_pending = false;
+                            input.preview_last_sent_power = 0;
+                            input.preview_last_sent_aim = 0;
+                            input.preview_last_sent_at = None;
+                            browser_transport::forget_pending_cancel();
+                        }
+                    }
+                }
+            }
+        }
     }
     let mut placement_sent_during_contact = false;
+    let previous_contact_power = input.power;
     update_from_pointer(
         &mut input,
         cursor,
         Vec2::new(window.width(), window.height()),
         &mut placement_sent_during_contact,
     );
-    if input.pointer_contact == PointerContact::Aim {
-        let window_size = Vec2::new(window.width(), window.height());
-        let scale = (window_size / DESIGN_SIZE).min_element();
-        let world = Vec2::new(
-            cursor.x - window_size.x / 2.0,
-            window_size.y / 2.0 - cursor.y,
-        ) / scale;
-        let cue = presentation.target.get(&0).copied().unwrap_or(Vec2::ZERO);
-        let direction = world - cue;
-        input.aim_angle = direction.y.atan2(direction.x);
-    }
     #[cfg(target_arch = "wasm32")]
     {
         input.placement_sent_during_contact |= placement_sent_during_contact;
+        if !sandbox.enabled && input.drag_origin.is_some() && input.power > 0.0 {
+            publish_gesture(&mut input, false);
+        } else if !sandbox.enabled
+            && (input.preview_last_sent_power > 0 || previous_contact_power > 0.0)
+            && input.drag_origin.is_some()
+            && !input.preview_cancel_pending
+        {
+            publish_gesture(&mut input, true);
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = placement_sent_during_contact;
+    let _ = (
+        placement_sent_during_contact,
+        presentation,
+        previous_contact_power,
+    );
+    #[cfg(target_arch = "wasm32")]
+    let _ = presentation;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn publish_gesture(input: &mut PrototypeInput, cancel: bool) {
+    if !input.preview_active {
+        return;
+    }
+    if !cancel && input.preview_cancel_pending && input.power <= 0.0 {
+        return;
+    }
+    if !cancel && input.preview_cancel_pending && input.power > 0.0 {
+        input.preview_cancel_pending = false;
+        input.preview_gesture = input.preview_gesture.wrapping_add(1);
+        input.preview_last_sent_power = 0;
+        input.preview_last_sent_aim = 0;
+        input.preview_last_sent_at = None;
+        browser_transport::forget_pending_cancel();
+    }
+    let shot = practice_shot(input);
+    let timeout_ms = 300.0;
+    if !cancel
+        && shot.aim.steps() == input.preview_last_sent_aim
+        && shot.power.units() == input.preview_last_sent_power
+        && input.preview_last_sent_power > 0
+        && input
+            .preview_last_sent_at
+            .is_some_and(|at| browser_transport::monotonic_millis() - at < timeout_ms)
+    {
+        return;
+    }
+    let preview = pwmtf_protocol::ShotPreview {
+        revision: input.preview_revision,
+        gesture: input.preview_gesture,
+        sequence: input.preview_sequence,
+        aim: shot.aim,
+        power: shot.power,
+        spin: shot.spin,
+        cancel,
+    };
+    if cancel {
+        if browser_transport::send_preview(preview).is_ok() {
+            input.preview_sequence = input.preview_sequence.wrapping_add(1);
+            input.preview_cancel_pending = true;
+            input.preview_last_sent_power = 0;
+        }
+    } else if browser_transport::resend_preview(preview).unwrap_or(false) {
+        input.preview_sequence = input.preview_sequence.wrapping_add(1);
+        input.preview_last_sent_power = shot.power.units();
+        input.preview_last_sent_aim = shot.aim.steps();
+        input.preview_last_sent_at = Some(browser_transport::monotonic_millis());
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1130,9 +1375,25 @@ fn update_aim(
         .get(&0)
         .copied()
         .unwrap_or(Vec2::new(-330.0, 0.0));
-    **cue = cue_transform(cue_ball, input.aim_angle, input.power);
+    #[cfg(target_arch = "wasm32")]
+    let remote = if !browser_transport::accepts_active_player_command() {
+        browser_transport::remote_preview()
+    } else {
+        None
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (angle, strength) = remote.map_or((input.aim_angle, input.power), |preview| {
+        (
+            f32::from(preview.aim.steps()) * std::f32::consts::TAU
+                / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN),
+            f32::from(preview.power.units()) / f32::from(pwmtf_game_domain::ShotPower::MAX),
+        )
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let (angle, strength) = (input.aim_angle, input.power);
+    **cue = cue_transform(cue_ball, angle, strength);
 
-    let fill_height = POWER_BAR_HEIGHT * input.power;
+    let fill_height = POWER_BAR_HEIGHT * strength;
     power.0.custom_size = Some(Vec2::new(30.0, fill_height));
     power.1.translation.y = (fill_height - POWER_BAR_HEIGHT) / 2.0;
 }
@@ -1161,6 +1422,12 @@ fn update_orientation(
         }
     }
     if is_portrait || window.width() < MINIMUM_VIEWPORT_WIDTH {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if input.preview_last_sent_power > 0 {
+                publish_gesture(&mut input, true);
+            }
+        }
         input.release_active_touch(true);
     }
 }
@@ -1357,70 +1624,136 @@ mod tests {
     }
 
     #[test]
-    fn power_hit_area_matches_drawn_bar_at_multiple_viewports() {
+    fn drag_must_start_near_cue_ball_at_any_scale() {
         for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
+            let cue = Vec2::new(-330.0, 0.0);
             let scale = (size / DESIGN_SIZE).min_element();
-            let center = size / 2.0 + Vec2::new(565.0, 0.0) * scale;
-            assert_eq!(
-                classify_pointer_contact(center, size),
-                PointerContact::Power
-            );
-            let table = size / 2.0 + Vec2::new(400.0, 0.0) * scale;
-            assert_eq!(classify_pointer_contact(table, size), PointerContact::Aim);
-            let mut input = PrototypeInput {
-                pointer_contact: PointerContact::Power,
-                ..Default::default()
-            };
-            let mut placed = false;
-            update_from_pointer(&mut input, center, size, &mut placed);
-            assert!((input.power - 0.5).abs() < 0.001);
+            let center = size / 2.0 + Vec2::new(cue.x, -cue.y) * scale;
+            assert!(starts_near_cue_ball(center, size, cue));
+            assert!(starts_near_cue_ball(
+                center + Vec2::new(69.0, 0.0) * scale,
+                size,
+                cue
+            ));
+            assert!(!starts_near_cue_ball(
+                center + Vec2::new(71.0, 0.0) * scale,
+                size,
+                cue
+            ));
         }
     }
 
     #[test]
-    fn power_drag_stays_power_after_leaving_the_bar() {
-        let mut input = PrototypeInput {
-            pointer_contact: PointerContact::Power,
-            aim_angle: 0.7,
-            ..Default::default()
-        };
-        let mut placed = false;
-        update_from_pointer(
-            &mut input,
-            Vec2::new(300.0, 100.0),
-            DESIGN_SIZE,
-            &mut placed,
-        );
-        assert!((input.aim_angle - 0.7).abs() < 0.001);
-        assert!((input.power - 1.0).abs() < 0.001);
+    fn drag_updates_aim_and_power_together_at_multiple_viewports() {
+        for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
+            let origin = size / 2.0;
+            let mut input = PrototypeInput {
+                pointer_contact: PointerContact::Aim,
+                drag_origin: Some(Vec2::ZERO),
+                ..Default::default()
+            };
+            let scale = (size / DESIGN_SIZE).min_element();
+            update_drag(&mut input, origin + Vec2::new(-100.0, 0.0) * scale, size);
+            let first = input.power;
+            assert!((input.aim_angle).abs() < 0.001);
+            assert!(first > 0.0);
+            update_drag(&mut input, origin + Vec2::new(0.0, 60.0) * scale, size);
+            assert!((input.aim_angle - std::f32::consts::FRAC_PI_2).abs() < 0.001);
+            assert!(input.power < first);
+            update_drag(&mut input, origin, size);
+            assert!(input.power.abs() < f32::EPSILON);
+            update_drag(&mut input, origin + Vec2::new(500.0, 0.0) * scale, size);
+            assert!((input.power - 1.0).abs() < f32::EPSILON);
+            input.release_active_touch(true);
+            assert!(input.drag_origin.is_none());
+            assert!(input.power.abs() < f32::EPSILON);
+        }
     }
 
     #[test]
-    fn power_pointer_is_clamped_to_supported_range() {
-        let mut input = PrototypeInput {
-            pointer_contact: PointerContact::Power,
-            ..Default::default()
-        };
-        let size = Vec2::new(1_000.0, 500.0);
-
-        let mut placed = false;
-        update_from_pointer(&mut input, Vec2::new(900.0, -100.0), size, &mut placed);
-        assert!((input.power - 1.0).abs() < f32::EPSILON);
-
-        update_from_pointer(&mut input, Vec2::new(900.0, 1_000.0), size, &mut placed);
-        assert!((input.power - MIN_POWER).abs() < f32::EPSILON);
+    fn focus_loss_cancels_charged_contact_until_release() {
+        let mut app = App::new();
+        app.add_message::<WindowFocused>()
+            .insert_resource(PrototypeInput {
+                active_touch: Some(7),
+                pointer_contact: PointerContact::Aim,
+                drag_origin: Some(Vec2::ZERO),
+                power: 0.7,
+                ..Default::default()
+            })
+            .add_systems(Update, cancel_input_on_focus_loss);
+        app.world_mut().write_message(WindowFocused {
+            window: Entity::PLACEHOLDER,
+            focused: false,
+        });
+        app.update();
+        let input = app.world().resource::<PrototypeInput>();
+        assert!(input.drag_origin.is_none());
+        assert!(input.active_touch.is_none());
+        assert_eq!(input.pointer_contact, PointerContact::None);
+        assert!(input.touch_rearm_blocked);
+        assert!(input.power.abs() < f32::EPSILON);
     }
 
     #[test]
-    fn aim_pointer_maps_window_coordinates_to_world_angle() {
-        let mut input = PrototypeInput::default();
-        let size = Vec2::new(1_000.0, 500.0);
+    fn canceled_touch_is_not_an_intentional_release() {
+        use bevy::input::touch::{TouchInput, TouchPhase, touch_screen_input_system};
+        let mut app = App::new();
+        app.add_message::<TouchInput>()
+            .init_resource::<Touches>()
+            .add_systems(Update, touch_screen_input_system);
+        let touch = |phase| TouchInput {
+            phase,
+            position: Vec2::new(120.0, 90.0),
+            window: Entity::PLACEHOLDER,
+            force: None,
+            id: 7,
+        };
+        app.world_mut().write_message(touch(TouchPhase::Started));
+        app.update();
+        app.world_mut().write_message(touch(TouchPhase::Canceled));
+        app.update();
+        assert!(!touch_release_is_intentional(
+            Some(7),
+            app.world().resource::<Touches>()
+        ));
+        let mut input = PrototypeInput {
+            active_touch: Some(7),
+            pointer_contact: PointerContact::Aim,
+            drag_origin: Some(Vec2::ZERO),
+            power: 0.7,
+            ..Default::default()
+        };
+        input.release_active_touch(true);
+        assert!(input.drag_origin.is_none() && input.touch_rearm_blocked);
+        app.world_mut().write_message(touch(TouchPhase::Started));
+        app.update();
+        app.world_mut().write_message(touch(TouchPhase::Ended));
+        app.update();
+        assert!(touch_release_is_intentional(
+            Some(7),
+            app.world().resource::<Touches>()
+        ));
+        assert!(touch_release_is_intentional(
+            None,
+            app.world().resource::<Touches>()
+        ));
+    }
 
-        let mut placed = false;
-        update_from_pointer(&mut input, Vec2::new(750.0, 250.0), size, &mut placed);
-        assert!(input.aim_angle.abs() < f32::EPSILON);
-
-        update_from_pointer(&mut input, Vec2::new(500.0, 125.0), size, &mut placed);
-        assert!((input.aim_angle - std::f32::consts::FRAC_PI_2).abs() < f32::EPSILON);
+    #[test]
+    fn canceled_contact_cannot_restart_without_a_fresh_press() {
+        let mut input = PrototypeInput {
+            pointer_contact: PointerContact::Aim,
+            drag_origin: Some(Vec2::ZERO),
+            power: 0.7,
+            ..Default::default()
+        };
+        input.release_active_touch(true);
+        assert!(input.interrupted && input.touch_rearm_blocked);
+        assert!(input.drag_origin.is_none());
+        assert!(input.power.abs() < f32::EPSILON);
+        input.interrupted = false;
+        input.rearm_touch_input();
+        assert!(!input.touch_rearm_blocked);
     }
 }

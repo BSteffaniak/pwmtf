@@ -194,6 +194,8 @@ grep -q '"completed":false' "$tmp/live-match-zero.body"
 grep -Eq '"deadline_at_ms":[0-9]+' "$tmp/live-match-zero.body"
 grep -Eq '"server_time_ms":[0-9]+' "$tmp/live-match-zero.body"
 
+node ./scripts/test-shot-preview.js "$port" "$live_match_id" "$player_one_cookie" "$player_two_cookie"
+
 node - "$port" "$live_match_id" "$player_one_cookie" "$player_two_cookie" "$live_command" "$live_terminal_command" <<'JS'
 import net from "node:net";
 import crypto from "node:crypto";
