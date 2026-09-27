@@ -91,7 +91,7 @@ async function page(cookie, matchId = seed.live_match_id) {
   await send('Network.setCookie', {name: 'pwmtf_dev_session', value: token, url: base, httpOnly: true, sameSite: 'Lax'}, sessionId);
   await send('Page.navigate', {url: `${base}/?match=${matchId}`}, sessionId);
   await until('match ready', () => evaluate(sessionId, 'document.querySelector("#game-shell")?.dataset.clientState === "ready" && document.querySelector("#match-status")?.textContent.includes("Connected")'), 60000);
-  return {sessionId, targetId};
+  return {sessionId, targetId, browserContextId};
 }
 async function practicePage() {
   const {browserContextId} = await send('Target.createBrowserContext');
@@ -102,7 +102,7 @@ async function practicePage() {
   await send('Page.navigate', {url: `${base}/`}, sessionId);
   await until('practice ready', () => evaluate(sessionId,
     'document.querySelector("#game-shell")?.dataset.clientState === "ready"'), 60000);
-  return {sessionId, targetId};
+  return {sessionId, targetId, browserContextId};
 }
 async function strangerPage() {
   const {browserContextId} = await send('Target.createBrowserContext');
@@ -138,7 +138,7 @@ async function replayPreview(session, payload) {
   await evaluate(session, `new Promise((resolve, reject) => {
     const socket = new WebSocket('ws://127.0.0.1:${port}/ws?match_id=${seed.live_match_id}');
     socket.binaryType = 'arraybuffer';
-    const timeout = setTimeout(() => { socket.close(); reject(new Error('preview replay handshake timed out')); }, 5000);
+    const timeout = setTimeout(() => { socket.close(); reject(new Error('preview replay handshake timed out')); }, 10000);
     socket.onopen = () => socket.send('1');
     socket.onerror = () => { clearTimeout(timeout); reject(new Error('preview replay socket failed')); };
     let negotiated = false;
@@ -155,6 +155,8 @@ let one, two, stranger;
 try {
   await send('Browser.getVersion');
   const practice = await practicePage();
+  const focusShooterPage = await page(seed.player_one_cookie, seed.focus_match_id);
+  const focusOpponentPage = await page(seed.player_two_cookie, seed.focus_match_id);
   const deadlineShooterPage = await page(seed.player_one_cookie, seed.deadline_match_id);
   const deadlineOpponentPage = await page(seed.player_two_cookie, seed.deadline_match_id);
   await send('Target.activateTarget', {targetId: practice.targetId});
@@ -228,6 +230,28 @@ try {
   const practiceMultitouchCanceled = await imageHash(practiceSession);
   await sleep(250);
   if (await imageHash(practiceSession) !== practiceMultitouchCanceled) throw new Error('second finger allowed a practice shot');
+  // A real tab switch must interrupt a charged mouse gesture. Do not count a
+  // synthetic blur or CDP focus-emulation setting as a device interruption.
+  const {targetId: otherTab} = await send('Target.createTarget', {url: 'about:blank', browserContextId: practice.browserContextId});
+  await send('Target.activateTarget', {targetId: practice.targetId});
+  await until('practice tab gains focus', () => evaluate(practiceSession, 'document.hasFocus()'));
+  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 0);
+  await mouse(practiceSession, 'mousePressed', practiceOrigin.x, practiceOrigin.y, 1);
+  await sleep(120);
+  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 100, practiceOrigin.y + 15, 1);
+  await until('practice focus-loss drag charges', async () => (await imageHash(practiceSession)) !== practiceMultitouchCanceled);
+  const chargedBeforeFocusLoss = await imageHash(practiceSession);
+  await send('Target.activateTarget', {targetId: otherTab});
+  await until('practice tab really loses focus', () => evaluate(practiceSession, '!document.hasFocus()'));
+  await send('Target.activateTarget', {targetId: practice.targetId});
+  await until('practice tab regains focus', () => evaluate(practiceSession, 'document.hasFocus()'));
+  await until('focus loss clears charged cue', async () => (await imageHash(practiceSession)) !== chargedBeforeFocusLoss);
+  await mouse(practiceSession, 'mouseReleased', practiceOrigin.x - 100, practiceOrigin.y + 15, 0);
+  await sleep(350);
+  const focusCanceled = await imageHash(practiceSession);
+  await sleep(250);
+  if (await imageHash(practiceSession) !== focusCanceled) throw new Error('tab switch fired an interrupted practice shot');
+  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 0);
   await mouse(practiceSession, 'mousePressed', practiceOrigin.x, practiceOrigin.y, 1);
   await sleep(120);
   await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 110, practiceOrigin.y + 25, 1);
@@ -239,6 +263,37 @@ try {
   const practiceMoving = await imageHash(practiceSession);
   await sleep(200);
   if (await imageHash(practiceSession) === practiceMoving) throw new Error('practice charged release did not move the rack');
+  // Independent multiplayer match: do not perturb the later shot/reconciliation
+  // scenario with Chrome tab-switch focus and pointer state.
+  const focusShooter = focusShooterPage.sessionId;
+  const focusOpponent = focusOpponentPage.sessionId;
+  await send('Emulation.setFocusEmulationEnabled', {enabled: true}, focusShooter);
+  await send('Emulation.setFocusEmulationEnabled', {enabled: true}, focusOpponent);
+  await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
+  await until('focus shooter is player one', () => evaluate(focusShooter, 'document.querySelector("#match-status")?.textContent.includes("your turn")'), 20000);
+  const focusCanvas = JSON.parse(await evaluate(focusShooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
+  const focusScale = Math.min(focusCanvas.width / 1220, focusCanvas.height / 590);
+  const focusOrigin = {x: focusCanvas.x + focusCanvas.width / 2 - 295 * focusScale, y: focusCanvas.y + focusCanvas.height / 2};
+  const focusBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
+  await mouse(focusShooter, 'mousePressed', focusOrigin.x, focusOrigin.y, 1);
+  await sleep(120);
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x - 100, focusOrigin.y + 15, 1);
+  await until('focus match opponent sees charged drag', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(focusBefore).some(frame => !preview(frame).cancel && preview(frame).power > 1000));
+  await send('Target.activateTarget', {targetId: focusOpponentPage.targetId});
+  const focusChargedImage = await imageHash(focusOpponent);
+  const {targetId: focusInterruptionTab} = await send('Target.createTarget', {url: 'about:blank', browserContextId: focusShooterPage.browserContextId});
+  await send('Emulation.setFocusEmulationEnabled', {enabled: false}, focusShooter);
+  await send('Target.activateTarget', {targetId: focusInterruptionTab});
+  await until('match shooter actually loses focus', () => evaluate(focusShooter, '!document.hasFocus()'));
+  await until('opponent drops interrupted cue', async () => (await imageHash(focusOpponent)) !== focusChargedImage, 5000);
+  await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
+  await until('match shooter regains focus', () => evaluate(focusShooter, 'document.hasFocus()'));
+  await mouse(focusShooter, 'mouseReleased', focusOrigin.x - 100, focusOrigin.y + 15, 0);
+  await sleep(350);
+  if ((frames.get(focusShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
+    throw new Error('match tab interruption submitted a shot');
+  }
   one = await page(seed.player_one_cookie);
   two = await page(seed.player_two_cookie);
   stranger = await strangerPage();
@@ -271,7 +326,7 @@ try {
   await send('Target.activateTarget', {targetId: deadlineShooterPage.targetId});
   await until('authoritative deadline advances both clients', async () =>
     (await evaluate(deadlineShooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')) &&
-    (await evaluate(deadlineOpponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')), 90000);
+    (await evaluate(deadlineOpponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')), 145000);
   const deadlineAccess = await evaluate(deadlineShooter, `fetch('/api/matches/${seed.deadline_match_id}').then(r => r.json())`);
   if (deadlineAccess.revision !== 1 || deadlineAccess.active_player !== 2 || deadlineAccess.deadline_at_ms === null) {
     throw new Error(`authoritative deadline did not transfer the turn: ${JSON.stringify(deadlineAccess)}`);
@@ -479,7 +534,7 @@ try {
   if ((frames.get(shooter) ?? []).filter(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE')).length !== 1) {
     throw new Error('release did not submit exactly one canonical command');
   }
-  console.log('practice mouse/touch/multitouch cancel, drag/dead-zone/local shot and two-browser live aim/power, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, outsider isolation and authoritative shot passed');
+  console.log('practice mouse/touch/multitouch and real tab-switch cancel, drag/dead-zone/local shot and two-browser live aim/power, match tab-switch interruption, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, outsider isolation and authoritative shot passed');
 } catch (error) {
   console.error(`two-browser shot failed: ${error.stack ?? error}`);
   process.exitCode = 1;

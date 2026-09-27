@@ -93,8 +93,10 @@ pub async fn revoke_token(db: &dyn Database, token: &str) -> Result<(), SessionS
     revoke_session(db, token.hash()).await
 }
 
-/// Resolves an unexpired session hash from Switchy storage and atomically
-/// advances its last-use timestamp.
+/// Resolves an unexpired session hash and atomically advances last-use.
+///
+/// Contention before the first write is retried from a fresh Switchy
+/// transaction. An ambiguous commit is never retried.
 ///
 /// # Errors
 ///
@@ -104,13 +106,33 @@ pub async fn resolve_session(
     token_hash: SessionTokenHash,
     now: u64,
 ) -> Result<Option<AccountId>, SessionStoreError> {
-    let tx = db.begin_transaction().await?;
+    for attempt in 0..5 {
+        // Only retry failures before the first successful write. A failed
+        // commit is ambiguous: authentication must fail closed in that case.
+        match resolve_session_once(db, token_hash, now).await {
+            Err(SessionStoreError::PreWriteBusy) if attempt < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(20 * (attempt + 1))).await;
+            }
+            Err(SessionStoreError::PreWriteBusy) => return Err(SessionStoreError::Busy),
+            result => return result,
+        }
+    }
+    unreachable!("bounded retry loop returns on its final attempt")
+}
+
+async fn resolve_session_once(
+    db: &dyn Database,
+    token_hash: SessionTokenHash,
+    now: u64,
+) -> Result<Option<AccountId>, SessionStoreError> {
+    let tx = db.begin_transaction().await.map_err(pre_write_error)?;
     let encoded_hash = encode_hash(token_hash);
     let rows = tx
         .select("sessions")
         .where_eq("session_hash", encoded_hash.clone())
         .execute(&*tx)
-        .await?;
+        .await
+        .map_err(pre_write_error)?;
     if rows.len() > 1 {
         return Err(SessionStoreError::Malformed);
     }
@@ -134,7 +156,8 @@ pub async fn resolve_session(
             .where_eq("session_hash", encoded_hash)
             .where_eq("last_used_at_ms", last_used_at)
             .execute(&*tx)
-            .await?;
+            .await
+            .map_err(pre_write_snapshot_error)?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -150,7 +173,8 @@ pub async fn resolve_session(
         .where_eq("session_hash", encoded_hash)
         .where_eq("last_used_at_ms", last_used_at)
         .execute(&*tx)
-        .await?;
+        .await
+        .map_err(pre_write_snapshot_error)?;
     if updated.len() != 1 {
         let current = tx
             .select("sessions")
@@ -181,6 +205,32 @@ pub async fn resolve_session(
     }
     tx.commit().await?;
     Ok(Some(AccountId::new(account)))
+}
+
+fn pre_write_error(error: switchy_database::DatabaseError) -> SessionStoreError {
+    if matches!(
+        &error,
+        switchy_database::DatabaseError::Turso(switchy_database::turso::TursoDatabaseError::Turso(
+            turso::Error::Busy(_) | turso::Error::BusySnapshot(_)
+        ))
+    ) {
+        SessionStoreError::PreWriteBusy
+    } else {
+        error.into()
+    }
+}
+
+fn pre_write_snapshot_error(error: switchy_database::DatabaseError) -> SessionStoreError {
+    if matches!(
+        &error,
+        switchy_database::DatabaseError::Turso(switchy_database::turso::TursoDatabaseError::Turso(
+            turso::Error::Busy(_) | turso::Error::BusySnapshot(_)
+        ))
+    ) {
+        SessionStoreError::PreWriteBusy
+    } else {
+        error.into()
+    }
 }
 
 /// Deletes every expired session by server-clock time.
@@ -222,6 +272,12 @@ pub enum SessionStoreError {
     /// Switchy query failed.
     #[error(transparent)]
     Database(#[from] switchy_database::DatabaseError),
+    /// A bounded retry exhausted pre-write Turso contention.
+    #[error("session storage is busy")]
+    Busy,
+    /// Retryable contention before a transaction's first successful write.
+    #[error("session storage is busy before write")]
+    PreWriteBusy,
     /// Token generation or canonical parsing failed.
     #[error(transparent)]
     Token(#[from] TokenError),
@@ -260,6 +316,34 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::*;
+
+    #[test]
+    fn pre_write_turso_contention_is_retryable_but_other_errors_are_not() {
+        use switchy_database::{DatabaseError, turso::TursoDatabaseError};
+        let busy =
+            || DatabaseError::Turso(TursoDatabaseError::Turso(turso::Error::Busy(String::new())));
+        let stale = || {
+            DatabaseError::Turso(TursoDatabaseError::Turso(turso::Error::BusySnapshot(
+                String::new(),
+            )))
+        };
+        assert!(matches!(
+            pre_write_error(busy()),
+            SessionStoreError::PreWriteBusy
+        ));
+        assert!(matches!(
+            pre_write_snapshot_error(stale()),
+            SessionStoreError::PreWriteBusy
+        ));
+        assert!(matches!(
+            pre_write_snapshot_error(busy()),
+            SessionStoreError::PreWriteBusy
+        ));
+        assert!(matches!(
+            pre_write_snapshot_error(DatabaseError::NoRow),
+            SessionStoreError::Database(_)
+        ));
+    }
 
     #[test]
     fn duplicate_session_insert_is_idempotent_but_conflicts_fail() {

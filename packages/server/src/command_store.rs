@@ -173,12 +173,73 @@ async fn commit_command(
         .deadline
         .map(|value| to_i64(value.due_at.value()))
         .transpose()?;
-    let tx = db.begin_transaction().await?;
+    // Switchy's Turso transactions start DEFERRED on a new connection. A
+    // concurrent writer can invalidate a read snapshot before the first
+    // insert; only that pre-write failure is safe to retry from a fresh tx.
+    // Never retry the update or commit: the durability outcome may be unknown.
+    for attempt in 0..5 {
+        match commit_command_once(
+            db,
+            command,
+            &state,
+            &envelope,
+            deadline_revision,
+            deadline_due_at,
+        )
+        .await
+        {
+            Err(CommandStoreError::PreWriteBusy) if attempt < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(20 * (attempt + 1))).await;
+            }
+            Err(CommandStoreError::PreWriteBusy) => return Err(CommandStoreError::Database),
+            result => return result,
+        }
+    }
+    unreachable!("bounded retry loop returns on its final attempt")
+}
+
+fn pre_write_error(error: switchy_database::DatabaseError) -> CommandStoreError {
+    let busy = matches!(
+        &error,
+        switchy_database::DatabaseError::Turso(switchy_database::turso::TursoDatabaseError::Turso(
+            turso::Error::BusySnapshot(_) | turso::Error::Busy(_)
+        ))
+    );
+    if busy {
+        CommandStoreError::PreWriteBusy
+    } else {
+        error.into()
+    }
+}
+
+fn pre_write_snapshot_error(error: switchy_database::DatabaseError) -> CommandStoreError {
+    if matches!(
+        &error,
+        switchy_database::DatabaseError::Turso(switchy_database::turso::TursoDatabaseError::Turso(
+            turso::Error::Busy(_) | turso::Error::BusySnapshot(_)
+        ))
+    ) {
+        CommandStoreError::PreWriteBusy
+    } else {
+        error.into()
+    }
+}
+
+async fn commit_command_once(
+    db: &dyn Database,
+    command: &AcceptedCommand,
+    state: &MatchState,
+    envelope: &CommandEnvelope,
+    deadline_revision: Option<i64>,
+    deadline_due_at: Option<i64>,
+) -> Result<(), CommandStoreError> {
+    let tx = db.begin_transaction().await.map_err(pre_write_error)?;
     let matches = tx
         .select("matches")
         .where_eq("match_id", command.match_id.value().to_string())
         .execute(&*tx)
-        .await?;
+        .await
+        .map_err(pre_write_error)?;
     let row = exactly_one(&matches)?;
     validate_match_configuration(row, &state.configuration())?;
     let current_revision = integer(row, "canonical_revision")?;
@@ -214,7 +275,8 @@ async fn commit_command(
                 .map(|value| value.due_at.value().to_string()),
         )
         .execute(&*tx)
-        .await?;
+        .await
+        .map_err(pre_write_snapshot_error)?;
 
     let updated = tx
         .update("matches")
@@ -452,6 +514,7 @@ fn decode_deadline(
 #[derive(Debug)]
 enum CommandStoreError {
     Database,
+    PreWriteBusy,
     Malformed,
     StaleRevision,
     Overflow,
@@ -599,6 +662,34 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn pre_write_contention_is_retryable_but_non_contention_is_not() {
+        use switchy_database::{DatabaseError, turso::TursoDatabaseError};
+        let busy =
+            || DatabaseError::Turso(TursoDatabaseError::Turso(turso::Error::Busy(String::new())));
+        let stale = || {
+            DatabaseError::Turso(TursoDatabaseError::Turso(turso::Error::BusySnapshot(
+                String::new(),
+            )))
+        };
+        assert!(matches!(
+            pre_write_error(busy()),
+            CommandStoreError::PreWriteBusy
+        ));
+        assert!(matches!(
+            pre_write_snapshot_error(stale()),
+            CommandStoreError::PreWriteBusy
+        ));
+        assert!(matches!(
+            pre_write_snapshot_error(busy()),
+            CommandStoreError::PreWriteBusy
+        ));
+        assert!(matches!(
+            pre_write_snapshot_error(DatabaseError::NoRow),
+            CommandStoreError::Database
+        ));
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)]

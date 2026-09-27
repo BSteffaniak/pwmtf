@@ -137,11 +137,30 @@ async fn run() -> Result<(), SeedError> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|_| SeedError::Integrity)?
                     .as_millis()
-                    .saturating_add(75_000),
+                    .saturating_add(105_000),
             )
             .map_err(|_| SeedError::Integrity)?,
         )
         .where_eq("match_id", deadline_match_id.value().to_string())
+        .execute(&*db)
+        .await?;
+    let focus_match_id = MatchId::new(7_004);
+    insert_initial_match(&*db, focus_match_id, participants, &deadline_state).await?;
+    db.update("matches")
+        .value("deadline_revision", 0_i64)
+        .value("deadline_player", 1_i64)
+        .value(
+            "deadline_at_ms",
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| SeedError::Integrity)?
+                    .as_millis()
+                    .saturating_add(3_600_000),
+            )
+            .map_err(|_| SeedError::Integrity)?,
+        )
+        .where_eq("match_id", focus_match_id.value().to_string())
         .execute(&*db)
         .await?;
     let live_command = CommandEnvelope::new(
@@ -180,6 +199,7 @@ async fn run() -> Result<(), SeedError> {
     let player_two_cookie = policy.set_cookie(&player_two_token, 3_600)?;
     println!("match_id={}", match_id.value());
     println!("deadline_match_id={}", deadline_match_id.value());
+    println!("focus_match_id={}", focus_match_id.value());
     println!("live_match_id={}", live_match_id.value());
     println!("live_command={}", encode_bytes(&live_command.to_bytes()));
     println!(
