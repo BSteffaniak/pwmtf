@@ -52,7 +52,6 @@ pub fn set_cue_spin(side: i32, vertical: i32) {
 }
 
 const DRAG_DEAD_ZONE: f32 = 20.0;
-const DRAG_START_RADIUS: f32 = 70.0;
 const DRAG_FULL_POWER: f32 = 180.0;
 const DEFAULT_POWER: f32 = 0.0;
 const MINIMUM_VIEWPORT_WIDTH: f32 = 1.0;
@@ -490,7 +489,7 @@ fn update_sandbox(
         if sandbox.moving {
             "Practice · balls rolling…"
         } else {
-            "Practice · drag back to aim and power · release to shoot"
+            "Practice · drag anywhere on the table to aim and power · release to shoot"
         }
         .into(),
     );
@@ -940,9 +939,11 @@ fn pointer_world(cursor: Vec2, size: Vec2) -> Vec2 {
     Vec2::new(cursor.x - size.x / 2.0, size.y / 2.0 - cursor.y) / scale
 }
 
-fn starts_near_cue_ball(cursor: Vec2, size: Vec2, cue_ball: Vec2) -> bool {
-    (pointer_world(cursor, size) - cue_ball).length_squared()
-        <= DRAG_START_RADIUS * DRAG_START_RADIUS
+fn pointer_on_table(cursor: Vec2, size: Vec2) -> bool {
+    let position = pointer_world(cursor, size);
+    let half = TABLE_SIZE / 2.0;
+    let center = Vec2::new(TABLE_CENTER_X, 0.0);
+    position.is_finite() && (position - center).abs().cmple(half).all()
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(clippy::missing_const_for_fn))]
@@ -1207,21 +1208,11 @@ fn update_input(
         if input.pointer_contact == PointerContact::Aim {
             #[cfg(target_arch = "wasm32")]
             let can_drag = !input.placing_cue_ball
-                && presentation.target.get(&0).is_some_and(|cue_ball| {
-                    starts_near_cue_ball(
-                        cursor,
-                        Vec2::new(window.width(), window.height()),
-                        *cue_ball,
-                    )
-                });
+                && presentation.target.contains_key(&0)
+                && pointer_on_table(cursor, Vec2::new(window.width(), window.height()));
             #[cfg(not(target_arch = "wasm32"))]
-            let can_drag = presentation.target.get(&0).is_some_and(|cue_ball| {
-                starts_near_cue_ball(
-                    cursor,
-                    Vec2::new(window.width(), window.height()),
-                    *cue_ball,
-                )
-            });
+            let can_drag = presentation.target.contains_key(&0)
+                && pointer_on_table(cursor, Vec2::new(window.width(), window.height()));
             if can_drag {
                 input.drag_origin = Some(pointer_world(
                     cursor,
@@ -1624,21 +1615,25 @@ mod tests {
     }
 
     #[test]
-    fn drag_must_start_near_cue_ball_at_any_scale() {
+    fn drag_can_start_anywhere_on_table_at_any_scale() {
         for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
-            let cue = Vec2::new(-330.0, 0.0);
             let scale = (size / DESIGN_SIZE).min_element();
-            let center = size / 2.0 + Vec2::new(cue.x, -cue.y) * scale;
-            assert!(starts_near_cue_ball(center, size, cue));
-            assert!(starts_near_cue_ball(
-                center + Vec2::new(69.0, 0.0) * scale,
-                size,
-                cue
+            let center = size / 2.0 + Vec2::new(TABLE_CENTER_X, 0.0) * scale;
+            for offset in [
+                Vec2::ZERO,
+                Vec2::new(-TABLE_SIZE.x / 2.0 + 1.0, -TABLE_SIZE.y / 2.0 + 1.0),
+                Vec2::new(TABLE_SIZE.x / 2.0 - 1.0, TABLE_SIZE.y / 2.0 - 1.0),
+                Vec2::new(310.0, -120.0),
+            ] {
+                assert!(pointer_on_table(center + offset * scale, size));
+            }
+            assert!(!pointer_on_table(
+                center + Vec2::new(481.0, 0.0) * scale,
+                size
             ));
-            assert!(!starts_near_cue_ball(
-                center + Vec2::new(71.0, 0.0) * scale,
-                size,
-                cue
+            assert!(!pointer_on_table(
+                center + Vec2::new(0.0, 241.0) * scale,
+                size
             ));
         }
     }

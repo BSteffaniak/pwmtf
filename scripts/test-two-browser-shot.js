@@ -155,6 +155,8 @@ let one, two, stranger;
 try {
   await send('Browser.getVersion');
   const practice = await practicePage();
+  const deadlineShooterPage = await page(seed.player_one_cookie, seed.deadline_match_id);
+  const deadlineOpponentPage = await page(seed.player_two_cookie, seed.deadline_match_id);
   await send('Target.activateTarget', {targetId: practice.targetId});
   const practiceSession = practice.sessionId;
   const practiceCanvasRect = JSON.parse(await evaluate(practiceSession, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
@@ -163,10 +165,35 @@ try {
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await sleep(300);
   const practiceIdle = await imageHash(practiceSession);
+  // The gesture begins well away from the cue ball, near the right rail.
+  const practiceDragStart = {x: practiceOrigin.x + 560 * practiceScale, y: practiceOrigin.y - 100 * practiceScale};
+  await mouse(practiceSession, 'mouseMoved', practiceDragStart.x, practiceDragStart.y, 0);
+  await mouse(practiceSession, 'mousePressed', practiceDragStart.x, practiceDragStart.y, 1);
+  await sleep(120);
+  await mouse(practiceSession, 'mouseMoved', practiceDragStart.x - 90, practiceDragStart.y, 1);
+  await until('practice remote-start drag changes local canvas', async () => (await imageHash(practiceSession)) !== practiceIdle);
+  await mouse(practiceSession, 'mouseMoved', practiceDragStart.x, practiceDragStart.y, 1);
+  await mouse(practiceSession, 'mouseReleased', practiceDragStart.x, practiceDragStart.y, 0);
+  await sleep(350);
+  const practiceRemoteStartCanceled = await imageHash(practiceSession);
+  await sleep(250);
+  if (await imageHash(practiceSession) !== practiceRemoteStartCanceled) throw new Error('uncharged remote-start drag fired');
+  await touch(practiceSession, 'touchStart', [[8, practiceDragStart.x, practiceDragStart.y]]);
+  await sleep(120);
+  await touch(practiceSession, 'touchMove', [[8, practiceDragStart.x - 100, practiceDragStart.y]]);
+  await until('practice anywhere-start touch charges', async () => (await imageHash(practiceSession)) !== practiceRemoteStartCanceled);
+  await touch(practiceSession, 'touchMove', [[8, practiceDragStart.x, practiceDragStart.y]]);
+  await sleep(120);
+  await touch(practiceSession, 'touchEnd', []);
+  await sleep(300);
+  const remoteTouchCanceled = await imageHash(practiceSession);
+  await sleep(250);
+  if (await imageHash(practiceSession) !== remoteTouchCanceled) throw new Error('uncharged anywhere-start touch fired');
   await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 0);
   await mouse(practiceSession, 'mousePressed', practiceOrigin.x, practiceOrigin.y, 1);
+  await sleep(120);
   await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 90, practiceOrigin.y, 1);
-  await until('practice drag changes local canvas', async () => (await imageHash(practiceSession)) !== practiceIdle);
+  await until('practice drag changes local canvas', async () => (await imageHash(practiceSession)) !== remoteTouchCanceled);
   const practiceCharged = await imageHash(practiceSession);
   await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 65, practiceOrigin.y + 35, 1);
   await until('practice drag updates direction and power', async () => (await imageHash(practiceSession)) !== practiceCharged);
@@ -222,8 +249,6 @@ try {
   }
   const shooter = one.sessionId;
   const opponent = two.sessionId;
-  const deadlineShooterPage = await page(seed.player_one_cookie, seed.deadline_match_id);
-  const deadlineOpponentPage = await page(seed.player_two_cookie, seed.deadline_match_id);
   const deadlineShooter = deadlineShooterPage.sessionId;
   const deadlineOpponent = deadlineOpponentPage.sessionId;
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, deadlineShooter);
@@ -275,12 +300,29 @@ try {
   const canvas = JSON.parse(await evaluate(shooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const scale = Math.min(canvas.width / 1220, canvas.height / 590);
   const origin = {x: canvas.x + canvas.width / 2 - 295 * scale, y: canvas.y + canvas.height / 2};
+  const matchDragStart = {x: origin.x + 540 * scale, y: origin.y - 95 * scale};
+  await mouse(shooter, 'mouseMoved', matchDragStart.x, matchDragStart.y, 0);
+  await mouse(shooter, 'mousePressed', matchDragStart.x, matchDragStart.y, 1);
+  await sleep(100);
+  await mouse(shooter, 'mouseMoved', matchDragStart.x - 90, matchDragStart.y, 1);
+  await until('opponent sees preview from anywhere on table', () => previews(opponent, 'Network.webSocketFrameReceived').length > 0);
+  await mouse(shooter, 'mouseMoved', matchDragStart.x, matchDragStart.y, 1);
+  await mouse(shooter, 'mouseReleased', matchDragStart.x, matchDragStart.y, 0);
+  await until('opponent sees anywhere-start cancel', () => previews(opponent, 'Network.webSocketFrameReceived').some(frame => preview(frame).cancel));
+  if (await evaluate(shooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')) throw new Error('anywhere-start dead-zone release fired a match shot');
+  const previewStart = previews(opponent, 'Network.webSocketFrameReceived').length;
   await mouse(shooter, 'mouseMoved', origin.x, origin.y, 0);
   await mouse(shooter, 'mousePressed', origin.x, origin.y, 1);
   await sleep(100);
   await mouse(shooter, 'mouseMoved', origin.x - 90, origin.y, 1);
-  await until('first preview', () => previews(opponent, 'Network.webSocketFrameReceived').length > 0);
-  const first = preview(previews(opponent, 'Network.webSocketFrameReceived')[0]);
+  await until('first charged preview', () => previews(opponent, 'Network.webSocketFrameReceived').slice(previewStart).some(frame => {
+    const value = preview(frame);
+    return !value.cancel && value.power > 1000;
+  }));
+  const first = preview(previews(opponent, 'Network.webSocketFrameReceived').slice(previewStart).find(frame => {
+    const value = preview(frame);
+    return !value.cancel && value.power > 1000;
+  }));
   if (first.cancel || first.power < 1000) throw new Error('first drag did not charge');
   await sleep(120);
   if (previews(outsider, 'Network.webSocketFrameReceived').length) {

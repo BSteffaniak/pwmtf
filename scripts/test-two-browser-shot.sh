@@ -12,6 +12,11 @@ chrome=${CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrom
 [ -x "$chrome" ] || { echo 'Chrome unavailable for two-browser check' >&2; exit 1; }
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-two-browser.XXXXXX")
 cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ -f "$tmp/server.log" ]; then
+        echo "two-browser server diagnostics (last 40 lines):" >&2
+        tail -n 40 "$tmp/server.log" >&2
+    fi
     if [ -n "${pid:-}" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     rm -rf "$tmp"
 }
