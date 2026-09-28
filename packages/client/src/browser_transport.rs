@@ -18,6 +18,8 @@ thread_local! {
     static LAST_RECEIVED_SEQUENCE: RefCell<Option<(u64, u32)>> = const { RefCell::new(None) };
     static PENDING_CANCEL: RefCell<Option<(ShotPreview, f64)>> = const { RefCell::new(None) };
     static REMOTE_LAST: RefCell<Option<(u64, u64, u32, bool)>> = const { RefCell::new(None) };
+    static ACTIVE_PREVIEW: RefCell<Option<ShotPreview>> = const { RefCell::new(None) };
+    static INTERRUPTED_GESTURE: RefCell<Option<u32>> = const { RefCell::new(None) };
 }
 
 /// Monotonic browser clock in milliseconds; never use `std::time::Instant` on WASM.
@@ -235,14 +237,42 @@ pub fn send_preview(value: ShotPreview) -> Result<(), wasm_bindgen::JsValue> {
     }
     if !value.cancel {
         PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+        INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow_mut() = None);
     }
     let frame = value.to_bytes();
     send_command(&frame)?;
     LAST_SENT.with(|sent| *sent.borrow_mut() = Some(monotonic_millis()));
+    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = (!value.cancel).then_some(value));
     if value.cancel {
         PENDING_CANCEL.with(|pending| *pending.borrow_mut() = Some((value, monotonic_millis())));
     }
     Ok(())
+}
+
+/// Cancels a charged preview before the browser suspends rendering on blur or
+/// visibility loss. This does not submit a gameplay command.
+pub fn cancel_preview_on_interruption() {
+    let value = ACTIVE_PREVIEW.with(|active| active.borrow_mut().take());
+    if let Some(mut value) = value {
+        INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow_mut() = Some(value.sequence));
+        value.cancel = true;
+        value.sequence = value.sequence.saturating_add(1);
+        // A hidden tab may close its socket immediately after this send.
+        // Expiry remains the fallback when transport is unavailable.
+        let _ = send_preview(value);
+    }
+}
+
+/// Returns the interrupted preview sequence until the held pointer is
+/// released. Callers must not reuse that sequence for a new gesture.
+#[must_use]
+pub fn interrupted_preview_sequence() -> Option<u32> {
+    INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow())
+}
+
+/// Clears the interruption latch after the held pointer is fully released.
+pub fn rearm_interrupted_gesture() {
+    INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow_mut() = None);
 }
 
 /// Repeats the latest preview at a bounded cadence so an idle drag stays visible.
@@ -262,6 +292,7 @@ pub fn resend_preview(value: ShotPreview) -> Result<bool, wasm_bindgen::JsValue>
     }
     send_command(&value.to_bytes())?;
     LAST_SENT.with(|sent| *sent.borrow_mut() = Some(monotonic_millis()));
+    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = Some(value));
     Ok(true)
 }
 
@@ -371,6 +402,7 @@ pub fn predict_and_send_shot(
         })
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
     PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = None);
     LAST_SENT.with(|sent| *sent.borrow_mut() = None);
     send_predicted_frame(&frame)
 }
@@ -410,6 +442,7 @@ pub fn disconnect() {
     TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
     REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
     PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
+    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = None);
     REMOTE_LAST.with(|last| *last.borrow_mut() = None);
     LAST_RECEIVED_SEQUENCE.with(|last| *last.borrow_mut() = None);
     LAST_SENT.with(|sent| *sent.borrow_mut() = None);

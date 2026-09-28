@@ -227,6 +227,14 @@ pub fn disconnect_match_socket() {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Cancels a live planning gesture before a browser tab loses focus.
+/// Does not affect canonical match state.
+pub fn interrupt_match_gesture() {
+    browser_transport::cancel_preview_on_interruption();
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 /// Returns whether the match socket completed negotiation and initialization.
 #[must_use]
 pub fn match_socket_ready() -> bool {
@@ -1111,6 +1119,13 @@ fn update_input(
     if let Some(sequence) = browser_transport::retry_pending_cancel() {
         input.preview_sequence = input.preview_sequence.max(sequence.saturating_add(1));
     }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(sequence) = browser_transport::interrupted_preview_sequence() {
+        input.preview_sequence = input.preview_sequence.max(sequence.saturating_add(2));
+        if input.drag_origin.is_some() {
+            input.release_active_touch(true);
+        }
+    }
     let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
     #[cfg(target_arch = "wasm32")]
     if !(browser_transport::accepts_active_player_command() || sandbox.enabled && !sandbox.moving) {
@@ -1123,6 +1138,7 @@ fn update_input(
         if !any_pressed && input.interrupted {
             input.interrupted = false;
             input.rearm_touch_input();
+            browser_transport::rearm_interrupted_gesture();
         }
         *was_pressed = any_pressed;
         return;
@@ -1184,6 +1200,8 @@ fn update_input(
             input.interrupted = false;
             input.rearm_touch_input();
         }
+        #[cfg(target_arch = "wasm32")]
+        browser_transport::rearm_interrupted_gesture();
         return;
     }
     if touches.iter().count() > 1 || (mouse_is_pressed && touches.iter().next().is_some()) {

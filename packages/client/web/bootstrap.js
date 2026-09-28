@@ -1917,8 +1917,12 @@ function startMatchSocket(module) {
     concedeMatchButton.hidden = true;
     matchStatus.textContent = "Offline · reconnecting when network returns";
   });
+  window.addEventListener("blur", () => {
+    module.interrupt_match_gesture();
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
+      module.interrupt_match_gesture();
       module.disconnect_match_socket();
       matchSocketActive = false;
       matchConnectStartedAt = null;

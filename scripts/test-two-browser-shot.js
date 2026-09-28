@@ -286,11 +286,21 @@ try {
   await send('Emulation.setFocusEmulationEnabled', {enabled: false}, focusShooter);
   await send('Target.activateTarget', {targetId: focusInterruptionTab});
   await until('match shooter actually loses focus', () => evaluate(focusShooter, '!document.hasFocus()'));
+  await until('match focus interruption reaches opponent', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(focusBefore).some(frame => preview(frame).cancel === 1), 1500);
   await until('opponent drops interrupted cue', async () => (await imageHash(focusOpponent)) !== focusChargedImage, 5000);
   await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
   await until('match shooter regains focus', () => evaluate(focusShooter, 'document.hasFocus()'));
-  await mouse(focusShooter, 'mouseReleased', focusOrigin.x - 100, focusOrigin.y + 15, 0);
-  await sleep(350);
+  await mouse(focusShooter, 'mouseReleased', focusOrigin.x, focusOrigin.y, 0);
+  await sleep(200);
+  const resumedBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
+  await mouse(focusShooter, 'mousePressed', focusOrigin.x, focusOrigin.y, 1);
+  await sleep(120);
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x - 95, focusOrigin.y + 30, 1);
+  await until('same-match drag resumes after tab interruption', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(resumedBefore).some(frame => !preview(frame).cancel && preview(frame).power > 1000));
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 1);
+  await until('resumed match drag cancels at origin', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(resumedBefore).some(frame => preview(frame).cancel === 1));
+  await mouse(focusShooter, 'mouseReleased', focusOrigin.x, focusOrigin.y, 0);
   if ((frames.get(focusShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
     throw new Error('match tab interruption submitted a shot');
   }
@@ -327,7 +337,9 @@ try {
   await until('authoritative deadline advances both clients', async () =>
     (await evaluate(deadlineShooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')) &&
     (await evaluate(deadlineOpponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')), 145000);
-  const deadlineAccess = await evaluate(deadlineShooter, `fetch('/api/matches/${seed.deadline_match_id}').then(r => r.json())`);
+  const deadlineAccessResult = await evaluate(deadlineShooter, `fetch('/api/matches/${seed.deadline_match_id}').then(async r => ({status: r.status, body: await r.text()}))`);
+  if (deadlineAccessResult.status !== 200) throw new Error(`deadline access HTTP ${deadlineAccessResult.status}: ${deadlineAccessResult.body.slice(0, 180)}`);
+  const deadlineAccess = JSON.parse(deadlineAccessResult.body);
   if (deadlineAccess.revision !== 1 || deadlineAccess.active_player !== 2 || deadlineAccess.deadline_at_ms === null) {
     throw new Error(`authoritative deadline did not transfer the turn: ${JSON.stringify(deadlineAccess)}`);
   }
@@ -465,6 +477,13 @@ try {
     '!document.querySelector("#match-status")?.textContent.includes("Connected")'), 15000);
   await send('Target.activateTarget', {targetId: two.targetId});
   await until('offline observer clears charged cue', async () => (await imageHash(opponent)) !== beforeReconnect);
+  // CDP may deliver frames already in flight after the socket's UI changes to
+  // disconnected. Establish the baseline only after that transition settles.
+  await sleep(150);
+  const receivedWhileOffline = previews(opponent, 'Network.webSocketFrameReceived').length;
+  if (receivedWhileOffline > receivedBeforeReload && previews(opponent, 'Network.webSocketFrameReceived').slice(receivedBeforeReload).some(frame => preview(frame).cancel)) {
+    throw new Error('observer received a cancel while disconnecting');
+  }
   // Cancel while the observer is offline: the cancel frame cannot reach it.
   await send('Debugger.resume', {}, shooter);
   await send('Target.activateTarget', {targetId: one.targetId});
@@ -474,8 +493,8 @@ try {
     return value.cancel === 1 && value.sequence > shortened.sequence;
   }));
   await sleep(100);
-  if (previews(opponent, 'Network.webSocketFrameReceived').length !== receivedBeforeReload) {
-    throw new Error('offline observer received a cancel that should have been dropped');
+  if (previews(opponent, 'Network.webSocketFrameReceived').length !== receivedWhileOffline) {
+    throw new Error(`offline observer received a frame after cancel: ${JSON.stringify(previews(opponent, 'Network.webSocketFrameReceived').slice(receivedWhileOffline).map(preview))}`);
   }
   await send('Debugger.pause', {}, shooter);
   await send('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1}, opponent);
@@ -483,7 +502,7 @@ try {
   await until('opponent reconnects to canonical match', () => evaluate(opponent,
     'document.querySelector("#game-shell")?.dataset.clientState === "ready" && document.querySelector("#match-status")?.textContent.includes("Connected")'), 60000);
   await sleep(800);
-  if (previews(opponent, 'Network.webSocketFrameReceived').length !== receivedBeforeReload) {
+  if (previews(opponent, 'Network.webSocketFrameReceived').length !== receivedWhileOffline) {
     throw new Error('reconnected observer received a replay of stale preview');
   }
   const reconnected = await imageHash(opponent);

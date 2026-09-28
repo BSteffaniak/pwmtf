@@ -135,6 +135,10 @@ impl BrowserTransport {
             TransportClientError::Protocol(error)
         })?;
         if self.has_revision(snapshot.revision) {
+            // A reconnect's initial snapshot may match the last accepted revision.
+            // It still completes negotiation for the replacement socket.
+            self.retry_attempt = 0;
+            self.status = ConnectionStatus::Ready;
             return Ok(None);
         }
         let reconciliation = if let Some(prediction) = &mut self.prediction {
@@ -347,6 +351,23 @@ mod tests {
         assert_eq!(transport.retry_delay_ms(), 500);
         transport.disconnected();
         assert_eq!(transport.retry_delay_ms(), 500);
+    }
+
+    #[test]
+    fn reconnect_at_same_revision_completes_negotiation() {
+        let mut transport = BrowserTransport::default();
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
+        transport.receive_snapshot(&snapshot(0)).unwrap();
+        transport.disconnected();
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
+        assert_eq!(transport.status(), ConnectionStatus::Negotiating);
+        assert_eq!(transport.receive_snapshot(&snapshot(0)).unwrap(), None);
+        assert_eq!(transport.status(), ConnectionStatus::Ready);
+        assert!(transport.accepts_gameplay_commands());
     }
 
     #[test]
