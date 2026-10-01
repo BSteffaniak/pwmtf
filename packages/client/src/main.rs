@@ -33,6 +33,28 @@ const BALL_RADIUS: f32 = {
         * (TABLE_SIZE.x / 2.0)
 };
 const POWER_BAR_HEIGHT: f32 = 300.0;
+const POWER_BAR_X: f32 = 565.0;
+#[cfg(target_arch = "wasm32")]
+static SHOT_CONTROL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Selects combined drag (0) or separate table aim and power-bar drag (1).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_shot_control_mode(mode: u8) {
+    SHOT_CONTROL_MODE.store(u8::from(mode == 1), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(clippy::missing_const_for_fn))]
+fn shot_control_mode() -> u8 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        SHOT_CONTROL_MODE.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
 #[cfg(target_arch = "wasm32")]
 const POCKET_SELECTION_RADIUS: f32 = 44.0;
 #[cfg(target_arch = "wasm32")]
@@ -102,6 +124,7 @@ struct PrototypeInput {
     active_touch: Option<u64>,
     pointer_contact: PointerContact,
     drag_origin: Option<Vec2>,
+    contact_mode: u8,
     interrupted: bool,
     #[cfg(target_arch = "wasm32")]
     preview_gesture: u64,
@@ -127,21 +150,25 @@ enum PointerContact {
     #[default]
     None,
     Aim,
+    Power,
     #[cfg(target_arch = "wasm32")]
     Auxiliary,
 }
 
 impl PrototypeInput {
-    const fn release_active_touch(&mut self, another_touch_is_pressed: bool) {
+    fn release_active_touch(&mut self, another_touch_is_pressed: bool) {
         self.active_touch = None;
         self.pointer_contact = PointerContact::None;
         self.drag_origin = None;
+        self.contact_mode = shot_control_mode();
         self.power = 0.0;
         self.interrupted = another_touch_is_pressed;
         #[cfg(target_arch = "wasm32")]
         {
             self.preview_active = false;
             self.preview_cancel_pending = false;
+            self.preview_last_sent_at = None;
+            self.preview_last_sent_power = 0;
         }
         self.touch_rearm_blocked = another_touch_is_pressed;
     }
@@ -167,6 +194,7 @@ impl Default for PrototypeInput {
             active_touch: None,
             pointer_contact: PointerContact::None,
             drag_origin: None,
+            contact_mode: 0,
             interrupted: false,
             #[cfg(target_arch = "wasm32")]
             preview_gesture: 0,
@@ -496,6 +524,8 @@ fn update_sandbox(
     presentation.status = Some(
         if sandbox.moving {
             "Practice · balls rolling…"
+        } else if shot_control_mode() == 1 {
+            "Practice · drag the table to aim · drag POWER down and release to shoot"
         } else {
             "Practice · drag anywhere on the table to aim and power · release to shoot"
         }
@@ -922,7 +952,7 @@ fn input_position(
         }
         #[cfg(target_arch = "wasm32")]
         {
-            if input.preview_last_sent_power > 0 {
+            if input.preview_last_sent_at.is_some() {
                 publish_gesture(input, true);
             }
         }
@@ -954,16 +984,21 @@ fn pointer_on_table(cursor: Vec2, size: Vec2) -> bool {
     position.is_finite() && (position - center).abs().cmple(half).all()
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), allow(clippy::missing_const_for_fn))]
-fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
+fn pointer_on_power_bar(cursor: Vec2, size: Vec2) -> bool {
+    let position = pointer_world(cursor, size);
+    position.is_finite()
+        && (position.x - POWER_BAR_X).abs() <= 32.0
+        && position.y.abs() <= POWER_BAR_HEIGHT / 2.0 + 14.0
+}
+
+fn classify_pointer_contact(cursor: Vec2, window_size: Vec2, mode: u8) -> PointerContact {
     #[cfg(target_arch = "wasm32")]
-    {
-        if selected_pocket(cursor, window_size).is_some() {
-            return PointerContact::Auxiliary;
-        }
+    if selected_pocket(cursor, window_size).is_some() {
+        return PointerContact::Auxiliary;
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = (cursor, window_size);
+    if mode == 1 && pointer_on_power_bar(cursor, window_size) {
+        return PointerContact::Power;
+    }
     PointerContact::Aim
 }
 
@@ -984,6 +1019,29 @@ fn update_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
     }
     input.power =
         ((distance - DRAG_DEAD_ZONE) / (DRAG_FULL_POWER - DRAG_DEAD_ZONE)).clamp(0.0, 1.0);
+}
+
+fn update_power_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
+    let Some(origin) = input.drag_origin else {
+        return;
+    };
+    let delta = origin.y - pointer_world(cursor, size).y;
+    input.power = if delta.is_finite() {
+        ((delta - DRAG_DEAD_ZONE) / (DRAG_FULL_POWER - DRAG_DEAD_ZONE)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+}
+
+fn update_aim_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
+    let Some(origin) = input.drag_origin else {
+        return;
+    };
+    let displacement = pointer_world(cursor, size) - origin;
+    if displacement.is_finite() && displacement.length() > DRAG_DEAD_ZONE {
+        input.aim_angle = (-displacement).to_angle();
+    }
+    input.power = 0.0;
 }
 
 #[allow(clippy::needless_pass_by_ref_mut)]
@@ -1016,7 +1074,13 @@ fn update_from_pointer(
         }
     }
     if input.pointer_contact == PointerContact::Aim && input.drag_origin.is_some() {
-        update_drag(input, cursor, window_size);
+        if input.contact_mode == 1 {
+            update_aim_drag(input, cursor, window_size);
+        } else {
+            update_drag(input, cursor, window_size);
+        }
+    } else if input.pointer_contact == PointerContact::Power && input.drag_origin.is_some() {
+        update_power_drag(input, cursor, window_size);
     }
 }
 
@@ -1092,7 +1156,7 @@ fn cancel_input_on_focus_loss(
     if focus_events.read().any(|event| !event.focused) {
         #[cfg(target_arch = "wasm32")]
         {
-            if input.preview_last_sent_power > 0 {
+            if input.preview_last_sent_at.is_some() {
                 publish_gesture(&mut input, true);
             }
         }
@@ -1102,6 +1166,14 @@ fn cancel_input_on_focus_loss(
 
 fn touch_release_is_intentional(active_touch: Option<u64>, touches: &Touches) -> bool {
     active_touch.is_none_or(|id| touches.just_released(id))
+}
+
+fn contact_is_charged(input: &PrototypeInput) -> bool {
+    (input.pointer_contact == PointerContact::Aim && input.contact_mode == 0
+        || input.pointer_contact == PointerContact::Power && input.contact_mode == 1)
+        && input.drag_origin.is_some()
+        && input.power > 0.0
+        && !input.touch_rearm_blocked
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
@@ -1127,9 +1199,20 @@ fn update_input(
         }
     }
     let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
+    if input.contact_mode != shot_control_mode() {
+        if any_pressed || input.drag_origin.is_some() {
+            #[cfg(target_arch = "wasm32")]
+            if input.preview_active && input.preview_last_sent_at.is_some() {
+                publish_gesture(&mut input, true);
+            }
+            input.release_active_touch(true);
+        } else {
+            input.contact_mode = shot_control_mode();
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     if !(browser_transport::accepts_active_player_command() || sandbox.enabled && !sandbox.moving) {
-        if input.preview_active && input.preview_last_sent_power > 0 {
+        if input.preview_active && input.preview_last_sent_at.is_some() {
             publish_gesture(&mut input, true);
         }
         if any_pressed || input.drag_origin.is_some() {
@@ -1160,17 +1243,14 @@ fn update_input(
         // both released and canceled contacts from `pressed` before this update.
         if !touch_release_is_intentional(input.active_touch, &touches) {
             #[cfg(target_arch = "wasm32")]
-            if input.preview_last_sent_power > 0 {
+            if input.preview_last_sent_at.is_some() {
                 publish_gesture(&mut input, true);
             }
             input.release_active_touch(true);
             *was_pressed = false;
             return;
         }
-        let charged = input.pointer_contact == PointerContact::Aim
-            && input.drag_origin.is_some()
-            && input.power > 0.0
-            && !input.touch_rearm_blocked;
+        let charged = contact_is_charged(&input);
         if sandbox.enabled && charged {
             sandbox.shoot(practice_shot(&input));
         }
@@ -1181,7 +1261,7 @@ fn update_input(
                 && !input.placement_sent_during_contact
                 && browser_transport::accepts_active_player_command()
                 && browser_transport::authoritative_revision() == Some(input.preview_revision);
-            if input.preview_active && input.preview_last_sent_power > 0 {
+            if input.preview_active && input.preview_last_sent_at.is_some() {
                 publish_gesture(&mut input, true);
             }
             if shot_eligible && release_shot(&input).is_ok() {
@@ -1207,7 +1287,7 @@ fn update_input(
     if touches.iter().count() > 1 || (mouse_is_pressed && touches.iter().next().is_some()) {
         #[cfg(target_arch = "wasm32")]
         {
-            if input.preview_last_sent_power > 0 {
+            if input.preview_last_sent_at.is_some() {
                 publish_gesture(&mut input, true);
             }
         }
@@ -1221,16 +1301,25 @@ fn update_input(
         return;
     }
     if started_contact && !input.interrupted {
-        input.pointer_contact =
-            classify_pointer_contact(cursor, Vec2::new(window.width(), window.height()));
-        if input.pointer_contact == PointerContact::Aim {
+        input.contact_mode = shot_control_mode();
+        input.pointer_contact = classify_pointer_contact(
+            cursor,
+            Vec2::new(window.width(), window.height()),
+            input.contact_mode,
+        );
+        if matches!(
+            input.pointer_contact,
+            PointerContact::Aim | PointerContact::Power
+        ) {
             #[cfg(target_arch = "wasm32")]
             let can_drag = !input.placing_cue_ball
                 && presentation.target.contains_key(&0)
-                && pointer_on_table(cursor, Vec2::new(window.width(), window.height()));
+                && (input.pointer_contact == PointerContact::Power
+                    || pointer_on_table(cursor, Vec2::new(window.width(), window.height())));
             #[cfg(not(target_arch = "wasm32"))]
             let can_drag = presentation.target.contains_key(&0)
-                && pointer_on_table(cursor, Vec2::new(window.width(), window.height()));
+                && (input.pointer_contact == PointerContact::Power
+                    || pointer_on_table(cursor, Vec2::new(window.width(), window.height())));
             if can_drag {
                 input.drag_origin = Some(pointer_world(
                     cursor,
@@ -1270,10 +1359,14 @@ fn update_input(
     #[cfg(target_arch = "wasm32")]
     {
         input.placement_sent_during_contact |= placement_sent_during_contact;
-        if !sandbox.enabled && input.drag_origin.is_some() && input.power > 0.0 {
+        if !sandbox.enabled
+            && input.drag_origin.is_some()
+            && (input.power > 0.0
+                || input.contact_mode == 1 && input.pointer_contact == PointerContact::Aim)
+        {
             publish_gesture(&mut input, false);
         } else if !sandbox.enabled
-            && (input.preview_last_sent_power > 0 || previous_contact_power > 0.0)
+            && (input.preview_last_sent_at.is_some() || previous_contact_power > 0.0)
             && input.drag_origin.is_some()
             && !input.preview_cancel_pending
         {
@@ -1295,10 +1388,7 @@ fn publish_gesture(input: &mut PrototypeInput, cancel: bool) {
     if !input.preview_active {
         return;
     }
-    if !cancel && input.preview_cancel_pending && input.power <= 0.0 {
-        return;
-    }
-    if !cancel && input.preview_cancel_pending && input.power > 0.0 {
+    if !cancel && input.preview_cancel_pending {
         input.preview_cancel_pending = false;
         input.preview_gesture = input.preview_gesture.wrapping_add(1);
         input.preview_last_sent_power = 0;
@@ -1311,7 +1401,6 @@ fn publish_gesture(input: &mut PrototypeInput, cancel: bool) {
     if !cancel
         && shot.aim.steps() == input.preview_last_sent_aim
         && shot.power.units() == input.preview_last_sent_power
-        && input.preview_last_sent_power > 0
         && input
             .preview_last_sent_at
             .is_some_and(|at| browser_transport::monotonic_millis() - at < timeout_ms)
@@ -1433,7 +1522,7 @@ fn update_orientation(
     if is_portrait || window.width() < MINIMUM_VIEWPORT_WIDTH {
         #[cfg(target_arch = "wasm32")]
         {
-            if input.preview_last_sent_power > 0 {
+            if input.preview_last_sent_at.is_some() {
                 publish_gesture(&mut input, true);
             }
         }
@@ -1630,6 +1719,50 @@ mod tests {
         input.release_active_touch(true);
         assert!(input.active_touch.is_none());
         assert!(input.touch_rearm_blocked);
+    }
+
+    #[test]
+    fn separate_controls_keep_aim_and_power_independent_and_safe() {
+        for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
+            let scale = (size / DESIGN_SIZE).min_element();
+            let bar = size / 2.0 + Vec2::new(POWER_BAR_X, 0.0) * scale;
+            assert_eq!(
+                classify_pointer_contact(bar, size, 1),
+                PointerContact::Power
+            );
+            assert_eq!(classify_pointer_contact(bar, size, 0), PointerContact::Aim);
+            let mut input = PrototypeInput {
+                contact_mode: 1,
+                pointer_contact: PointerContact::Aim,
+                drag_origin: Some(Vec2::ZERO),
+                ..Default::default()
+            };
+            update_from_pointer(
+                &mut input,
+                size / 2.0 + Vec2::new(-110.0, 0.0) * scale,
+                size,
+                &mut false,
+            );
+            assert!(input.aim_angle.abs() < 0.001);
+            assert!(input.power.abs() < f32::EPSILON);
+            assert!(!contact_is_charged(&input));
+            let angle = input.aim_angle;
+            input.pointer_contact = PointerContact::Power;
+            input.drag_origin = Some(Vec2::new(POWER_BAR_X, 0.0));
+            update_from_pointer(
+                &mut input,
+                bar + Vec2::new(0.0, 100.0) * scale,
+                size,
+                &mut false,
+            );
+            assert!(input.power > 0.0 && contact_is_charged(&input));
+            assert!((input.aim_angle - angle).abs() < f32::EPSILON);
+            update_from_pointer(&mut input, bar, size, &mut false);
+            assert!(input.power.abs() < f32::EPSILON);
+            assert!(!contact_is_charged(&input));
+            input.release_active_touch(true);
+            assert!(!contact_is_charged(&input));
+        }
     }
 
     #[test]

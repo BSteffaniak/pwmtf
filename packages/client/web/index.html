@@ -91,6 +91,12 @@
         </section>
         <output id="social-status" role="status" aria-live="polite"></output>
       </details>
+      <label id="shot-control-mode-control">Shot controls
+        <select id="shot-control-mode" aria-label="Shot control mode">
+          <option value="0">Combined drag</option>
+          <option value="1">Aim + power bar</option>
+        </select>
+      </label>
       <label id="aim-mode-control">Aim guide
         <select id="aim-mode" aria-label="Aim guide mode">
           <option value="1">Short (physics-accurate)</option>
@@ -105,13 +111,13 @@
         <label>Draw / follow <input id="spin-vertical" type="range" min="-100" max="100" value="0" /></label>
         <button id="reset-spin" type="button">Center hit</button>
       </fieldset>
-      <p>Start anywhere on the table and drag back to aim and set power together. Short pulls cancel; release a charged pull to shoot. The POWER bar shows your current strength.</p>
+      <p id="shot-control-instructions">Start anywhere on the table and drag back to aim and set power together. Short pulls cancel; release a charged pull to shoot. The POWER bar shows your current strength.</p>
       <button id="fullscreen-table" type="button">Full screen</button>
       </details>
       <div id="table-stage">
       <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Drag anywhere on the table to aim and power the shot; release to shoot."></canvas>
       </div>
-      <footer id="game-help">Start near the cue ball · Drag back to aim and power · Release to shoot</footer>
+      <footer id="game-help">Drag back anywhere on the table to aim and power · Release to shoot</footer>
       <section id="rotate-device" role="status" aria-live="polite">
         <strong>Rotate your device</strong>
         <span>Pool with More Than Friends plays in landscape.</span>

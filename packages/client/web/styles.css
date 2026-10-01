@@ -641,10 +641,10 @@ select:focus-visible,
 #game-menu { position: absolute; right: 8px; top: 6px; z-index: 5; }
 #game-menu > summary { cursor: pointer; padding: 9px 12px; border: 1px solid var(--panel-border); border-radius: 8px; background: var(--panel); }
 #game-menu[open] { width: min(380px, calc(100% - 16px)); max-height: calc(100% - 12px); overflow: auto; background: var(--panel); border-radius: 8px; padding: 8px; }
-#game-menu #account-panel, #game-menu #social-panel, #game-menu #aim-mode-control { position: static; width: auto; max-width: none; max-height: none; margin: 8px 0; box-shadow: none; }
+#game-menu #account-panel, #game-menu #social-panel, #game-menu #aim-mode-control, #game-menu #shot-control-mode-control { position: static; width: auto; max-width: none; max-height: none; margin: 8px 0; box-shadow: none; }
 #game-menu #account-panel { flex-wrap: wrap; }
 #game-menu #development-sign-in { flex-wrap: wrap; }
-#game-menu #aim-mode-control { display: block; }
+#game-menu #aim-mode-control, #game-menu #shot-control-mode-control { display: block; }
 #game-menu input, #game-menu select, #game-menu button { min-height: 36px; max-width: 100%; }
 @media (max-height: 500px) and (orientation: landscape) {
   #table-stage { inset: 0; }

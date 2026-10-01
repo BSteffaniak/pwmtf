@@ -84,6 +84,14 @@ fn first_hit(
     (distance, target)
 }
 
+const fn power_stroke_length(power: f32, clearance: f32) -> f32 {
+    power
+        .clamp(0.0, 1.0)
+        .mul_add(320.0, BALL_RADIUS)
+        .min(clearance)
+        .min(GUIDE_LENGTH)
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn draw(
     mut gizmos: Gizmos,
@@ -100,6 +108,8 @@ pub fn draw(
     };
     #[cfg(target_arch = "wasm32")]
     let mut preview_input = crate::PrototypeInput::default();
+    #[cfg(target_arch = "wasm32")]
+    let has_remote = remote.is_some();
     #[cfg(target_arch = "wasm32")]
     let input = if let Some(preview) = remote {
         preview_input.aim_angle = f32::from(preview.aim.steps()) * std::f32::consts::TAU
@@ -127,8 +137,39 @@ pub fn draw(
     if input.placing_cue_ball {
         return;
     }
+    #[cfg(target_arch = "wasm32")]
+    let show_power_stroke = has_remote || crate::shot_control_mode() == 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    let show_power_stroke = crate::shot_control_mode() == 1;
+    if enabled
+        && show_power_stroke
+        && let Some(&origin) = presentation.target.get(&0)
+    {
+        let direction = Vec2::from_angle(input.aim_angle);
+        let segments: Vec<_> = pwmtf_game_domain::TableGeometry::standard()
+            .cushion_segments()
+            .into_iter()
+            .map(|(a, b)| (canonical_to_world(a), canonical_to_world(b)))
+            .collect();
+        let (clearance, _) = first_hit(
+            origin,
+            direction,
+            &presentation.target,
+            rail_hit(origin, direction, &segments),
+        );
+        // The amber stroke is a bounded power indicator, not a claim about
+        // the ball's eventual trajectory or the physics-accurate guide.
+        let length = power_stroke_length(input.power, clearance);
+        if length > BALL_RADIUS {
+            gizmos.line_2d(
+                origin + direction * BALL_RADIUS,
+                origin + direction * length,
+                Color::srgb(0.96, 0.59, 0.12),
+            );
+        }
+    }
     let mode = MODE.load(Ordering::Relaxed);
-    if mode != 0 {
+    if mode != 0 && !(show_power_stroke && input.power <= 0.0) {
         let state = if sandbox.enabled {
             Some((
                 sandbox.table.clone(),
@@ -216,6 +257,16 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn power_stroke_grows_and_stops_at_first_contact() {
+        let low = power_stroke_length(0.2, 500.0);
+        assert!(low > BALL_RADIUS);
+        assert!(power_stroke_length(0.8, 500.0) > low);
+        assert!(power_stroke_length(1.0, 90.0) <= 90.0);
+        assert!(power_stroke_length(1.0, 900.0) <= GUIDE_LENGTH);
+        assert!(power_stroke_length(0.0, 500.0) <= BALL_RADIUS);
+    }
+
     #[test]
     fn nearest_ball_wins_and_balls_behind_are_ignored() {
         let balls = [

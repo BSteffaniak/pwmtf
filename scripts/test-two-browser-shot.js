@@ -167,6 +167,51 @@ try {
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await sleep(300);
   const practiceIdle = await imageHash(practiceSession);
+  // Exercise the alternate gesture without firing or changing the practice rack.
+  await evaluate(practiceSession, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '1';
+    control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
+  const alternateOrigin = {x: practiceOrigin.x, y: practiceOrigin.y};
+  await mouse(practiceSession, 'mouseMoved', alternateOrigin.x, alternateOrigin.y, 0);
+  await mouse(practiceSession, 'mousePressed', alternateOrigin.x, alternateOrigin.y, 1);
+  await sleep(120);
+  await mouse(practiceSession, 'mouseMoved', alternateOrigin.x - 110 * practiceScale, alternateOrigin.y, 1);
+  await until('separate aim drag changes cue without power', async () => (await imageHash(practiceSession)) !== practiceIdle);
+  await mouse(practiceSession, 'mouseReleased', alternateOrigin.x - 110 * practiceScale, alternateOrigin.y, 0);
+  const bar = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 + 565 * practiceScale,
+    y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 0);
+  await mouse(practiceSession, 'mousePressed', bar.x, bar.y, 1);
+  await sleep(120);
+  const beforeBarDrag = await imageHash(practiceSession);
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y + 100 * practiceScale, 1);
+  await until('separate power-bar drag changes cue and guide', async () => (await imageHash(practiceSession)) !== beforeBarDrag);
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 1);
+  await mouse(practiceSession, 'mouseReleased', bar.x, bar.y, 0);
+  await touch(practiceSession, 'touchStart', [[19, bar.x, bar.y]]);
+  await sleep(120);
+  await touch(practiceSession, 'touchMove', [[19, bar.x, bar.y + 110 * practiceScale]]);
+  await sleep(180);
+  await touch(practiceSession, 'touchCancel', []);
+  await sleep(200);
+  const touchBarCanceled = await imageHash(practiceSession);
+  await sleep(250);
+  if (await imageHash(practiceSession) !== touchBarCanceled) throw new Error('separate touch cancel fired a practice shot');
+  await evaluate(practiceSession, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '0';
+    control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
+  await sleep(250);
+  const combinedIdle = await imageHash(practiceSession);
+  await sleep(250);
+  if (await imageHash(practiceSession) !== combinedIdle) throw new Error('separate aim or uncharged power release fired');
+  // A canceled touch blocks rearming until a fresh released contact.
+  await touch(practiceSession, 'touchStart', [[20, bar.x, bar.y]]);
+  await touch(practiceSession, 'touchEnd', []);
+  await sleep(120);
   // The gesture begins well away from the cue ball, near the right rail.
   const practiceDragStart = {x: practiceOrigin.x + 560 * practiceScale, y: practiceOrigin.y - 100 * practiceScale};
   await mouse(practiceSession, 'mouseMoved', practiceDragStart.x, practiceDragStart.y, 0);
@@ -304,6 +349,47 @@ try {
   if ((frames.get(focusShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
     throw new Error('match tab interruption submitted a shot');
   }
+  // Same seeded match, separate control mode: aim-only must reach the opponent
+  // at zero power, and the bar must change power without altering that aim.
+  await evaluate(focusShooter, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '1'; control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
+  const separateBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
+  await mouse(focusShooter, 'mousePressed', focusOrigin.x, focusOrigin.y, 1);
+  await sleep(120);
+  await mouse(focusShooter, 'mouseMoved', focusOrigin.x - 110, focusOrigin.y, 1);
+  await sleep(140);
+  const aimed = await until('opponent sees separate aim without charge', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.aim === 0));
+  await mouse(focusShooter, 'mouseReleased', focusOrigin.x - 110, focusOrigin.y, 0);
+  await send('Target.activateTarget', {targetId: focusOpponentPage.targetId});
+  const separateAimImage = await imageHash(focusOpponent);
+  const separateBar = {x: focusCanvas.x + focusCanvas.width / 2 + 565 * focusScale,
+    y: focusCanvas.y + focusCanvas.height / 2};
+  await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y, 0);
+  await mouse(focusShooter, 'mousePressed', separateBar.x, separateBar.y, 1);
+  await sleep(120);
+  await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y + 100 * focusScale, 1);
+  await until('opponent sees separate bar power with fixed aim', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).some(value => !value.cancel && value.power > 1000 && value.aim === aimed.aim));
+  await until('opponent visibly sees separate power planning', async () => (await imageHash(focusOpponent)) !== separateAimImage);
+  await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y, 1);
+  await until('opponent sees separate bar return cancel', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).some(value => value.cancel === 1));
+  await mouse(focusShooter, 'mouseReleased', separateBar.x, separateBar.y, 0);
+  if ((frames.get(focusShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
+    throw new Error('uncharged separate mode sent a shot');
+  }
+  // Charge once more: releasing the bar, not the aim drag, submits one shot.
+  await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y, 0);
+  await mouse(focusShooter, 'mousePressed', separateBar.x, separateBar.y, 1);
+  await sleep(120);
+  await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y + 110 * focusScale, 1);
+  await until('separate mode charged before release', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).some(value => !value.cancel && value.power > 1000 && value.aim === aimed.aim));
+  await mouse(focusShooter, 'mouseReleased', separateBar.x, separateBar.y + 110 * focusScale, 0);
+  await until('separate power release reconciles authoritative shot', () => evaluate(focusOpponent,
+    'document.querySelector("#match-status")?.textContent.includes("revision 1")'), 30000);
+  const separateCommands = (frames.get(focusShooter) ?? []).filter(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'));
+  if (separateCommands.length !== 1) throw new Error(`separate bar release sent ${separateCommands.length} canonical shots`);
   one = await page(seed.player_one_cookie);
   two = await page(seed.player_two_cookie);
   stranger = await strangerPage();
@@ -553,7 +639,7 @@ try {
   if ((frames.get(shooter) ?? []).filter(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE')).length !== 1) {
     throw new Error('release did not submit exactly one canonical command');
   }
-  console.log('practice mouse/touch/multitouch and real tab-switch cancel, drag/dead-zone/local shot and two-browser live aim/power, match tab-switch interruption, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, outsider isolation and authoritative shot passed');
+  console.log('practice combined and separate controls (mouse aim/bar, touch cancellation), combined mouse/touch/multitouch and real tab-switch cancel, drag/dead-zone/local shot; two-browser separate aim/power preview and one authoritative bar-release shot, combined live aim/power, match tab-switch interruption, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect and outsider isolation passed');
 } catch (error) {
   console.error(`two-browser shot failed: ${error.stack ?? error}`);
   process.exitCode = 1;

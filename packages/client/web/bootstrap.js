@@ -1605,6 +1605,24 @@ let socialPollTimer = null;
 let socialRefreshInFlight = false;
 let wasmModule = null;
 const aimMode = document.querySelector("#aim-mode");
+const shotControlMode = document.querySelector("#shot-control-mode");
+const shotControlInstructions = document.querySelector("#shot-control-instructions");
+const gameHelp = document.querySelector("#game-help");
+const combinedHelp = "Drag back anywhere on the table to aim and power · Release to shoot";
+const separateHelp = "Drag on the table to aim · Drag the POWER bar down and release to shoot";
+function applyShotControlMode() {
+  const separate = shotControlMode.value === "1";
+  wasmModule?.set_shot_control_mode(separate ? 1 : 0);
+  gameHelp.textContent = separate ? separateHelp : combinedHelp;
+  shotControlInstructions.textContent = separate
+    ? "Drag the cue or anywhere on the table to aim without shooting. Drag the POWER bar down to adjust strength; release a charged pull to shoot. The amber line shows power, not the ball's predicted travel."
+    : "Start anywhere on the table and drag back to aim and set power together. Short pulls cancel; release a charged pull to shoot. The POWER bar shows your current strength.";
+  canvas.setAttribute("aria-label", separate
+    ? "Pool table. Drag to aim without shooting; drag the POWER bar down and release to shoot."
+    : "Pool table. Drag anywhere on the table to aim and power the shot; release to shoot.");
+}
+shotControlMode.addEventListener("change", applyShotControlMode);
+applyShotControlMode();
 const spinSide = document.querySelector("#spin-side");
 const spinVertical = document.querySelector("#spin-vertical");
 const updateSpin = () => wasmModule?.set_cue_spin(Number(spinSide.value), Number(spinVertical.value));
@@ -2468,6 +2486,7 @@ try {
   wasmModule = await import("./pwmtf_client.js");
   await wasmModule.default();
   wasmModule.set_aim_mode(Number(aimMode.value));
+  applyShotControlMode();
   updateSpin();
   wasmModule.set_unlimited_aim_range(unlimitedAimRange.checked);
   await sessionReady;
