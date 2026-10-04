@@ -1606,6 +1606,35 @@ let socialRefreshInFlight = false;
 let wasmModule = null;
 const aimMode = document.querySelector("#aim-mode");
 const shotControlMode = document.querySelector("#shot-control-mode");
+const unlimitedAimRange = document.querySelector("#unlimited-aim-range");
+// Device-local presentation preferences only; never persist shot inputs or identity.
+const preferencesKey = "pwmtf.presentation.v1";
+function loadPresentationPreferences() {
+  try {
+    const raw = window.localStorage.getItem(preferencesKey);
+    if (raw === null || raw.length > 256) return;
+    const value = JSON.parse(raw);
+    if (value === null || typeof value !== "object" || Array.isArray(value) || value.version !== 1) return;
+    if (value.shotControl === 0 || value.shotControl === 1) shotControlMode.value = String(value.shotControl);
+    if (value.aimGuide === 0 || value.aimGuide === 1 || value.aimGuide === 2) aimMode.value = String(value.aimGuide);
+    if (typeof value.unlimitedRange === "boolean") unlimitedAimRange.checked = value.unlimitedRange;
+  } catch {
+    // Browsers can deny storage; the visible defaults must still work.
+  }
+}
+function savePresentationPreferences() {
+  try {
+    window.localStorage.setItem(preferencesKey, JSON.stringify({
+      version: 1,
+      shotControl: Number(shotControlMode.value),
+      aimGuide: Number(aimMode.value),
+      unlimitedRange: unlimitedAimRange.checked,
+    }));
+  } catch {
+    // A private or storage-blocked browser still supports in-page changes.
+  }
+}
+loadPresentationPreferences();
 const shotControlInstructions = document.querySelector("#shot-control-instructions");
 const gameHelp = document.querySelector("#game-help");
 const combinedHelp = "Drag back anywhere on the table to aim and power · Release to shoot";
@@ -1621,7 +1650,10 @@ function applyShotControlMode() {
     ? "Pool table. Touch a point to aim from the cue ball toward it; drag to refine. Drag the POWER bar down and release to shoot."
     : "Pool table. Drag anywhere on the table to aim and power the shot; release to shoot.");
 }
-shotControlMode.addEventListener("change", applyShotControlMode);
+shotControlMode.addEventListener("change", () => {
+  applyShotControlMode();
+  savePresentationPreferences();
+});
 applyShotControlMode();
 const spinSide = document.querySelector("#spin-side");
 const spinVertical = document.querySelector("#spin-vertical");
@@ -1643,12 +1675,13 @@ fullscreenButton.addEventListener("click", async () => {
     fullscreenButton.textContent = "Full screen unavailable";
   }
 });
-const unlimitedAimRange = document.querySelector("#unlimited-aim-range");
 unlimitedAimRange.addEventListener("change", () => {
   wasmModule?.set_unlimited_aim_range(unlimitedAimRange.checked);
+  savePresentationPreferences();
 });
 aimMode.addEventListener("change", () => {
   wasmModule?.set_aim_mode(Number(aimMode.value));
+  savePresentationPreferences();
 });
 
 function applyMatchAccess(access, requestedAtMs = Date.now(), receivedAtMs = Date.now()) {

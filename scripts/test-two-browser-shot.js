@@ -91,6 +91,9 @@ async function page(cookie, matchId = seed.live_match_id) {
   await send('Network.setCookie', {name: 'pwmtf_dev_session', value: token, url: base, httpOnly: true, sameSite: 'Lax'}, sessionId);
   await send('Page.navigate', {url: `${base}/?match=${matchId}`}, sessionId);
   await until('match ready', () => evaluate(sessionId, 'document.querySelector("#game-shell")?.dataset.clientState === "ready" && document.querySelector("#match-status")?.textContent.includes("Connected")'), 60000);
+  if (await evaluate(sessionId, 'document.querySelector("#shot-control-mode")?.value') !== '1') {
+    throw new Error('new match context did not use default aim + power bar');
+  }
   return {sessionId, targetId, browserContextId};
 }
 async function practicePage() {
@@ -102,6 +105,9 @@ async function practicePage() {
   await send('Page.navigate', {url: `${base}/`}, sessionId);
   await until('practice ready', () => evaluate(sessionId,
     'document.querySelector("#game-shell")?.dataset.clientState === "ready"'), 60000);
+  if (await evaluate(sessionId, 'document.querySelector("#shot-control-mode")?.value') !== '1') {
+    throw new Error('new practice context did not use default aim + power bar');
+  }
   return {sessionId, targetId, browserContextId};
 }
 async function strangerPage() {
@@ -166,13 +172,42 @@ try {
   const practiceOrigin = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 - 295 * practiceScale,
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await sleep(300);
-  const practiceIdle = await imageHash(practiceSession);
-  // Exercise the alternate gesture without firing or changing the practice rack.
+  // The default is aim + power bar; the legacy gesture remains selectable.
+  if (await evaluate(practiceSession, 'document.querySelector("#shot-control-mode").value') !== '1') {
+    throw new Error('aim + power bar is not the default shot control');
+  }
+  await evaluate(practiceSession, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '0';
+    control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
   await evaluate(practiceSession, `(() => {
     const control = document.querySelector('#shot-control-mode');
     control.value = '1';
     control.dispatchEvent(new Event('change', {bubbles: true}));
+    const guide = document.querySelector('#aim-mode');
+    guide.value = '2'; guide.dispatchEvent(new Event('change', {bubbles: true}));
+    const range = document.querySelector('#unlimited-aim-range');
+    range.checked = true; range.dispatchEvent(new Event('change', {bubbles: true}));
   })()`);
+  const savedPreferences = await evaluate(practiceSession, `JSON.parse(localStorage.getItem('pwmtf.presentation.v1'))`);
+  if (savedPreferences.version !== 1 || savedPreferences.shotControl !== 1 || savedPreferences.aimGuide !== 2 || savedPreferences.unlimitedRange !== true) {
+    throw new Error('presentation preferences did not save valid selections');
+  }
+  await send('Page.reload', {ignoreCache: true}, practiceSession);
+  await until('saved preferences restore before practice is ready', () => evaluate(practiceSession,
+    `document.querySelector('#game-shell')?.dataset.clientState === 'ready' &&
+    document.querySelector('#shot-control-mode')?.value === '1' &&
+    document.querySelector('#aim-mode')?.value === '2' &&
+    document.querySelector('#unlimited-aim-range')?.checked === true`), 60000);
+  await evaluate(practiceSession, `(() => {
+    const guide = document.querySelector('#aim-mode');
+    guide.value = '1'; guide.dispatchEvent(new Event('change', {bubbles: true}));
+    const range = document.querySelector('#unlimited-aim-range');
+    range.checked = false; range.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
+  // Exercise separate controls without firing or changing the practice rack.
+  const practiceIdle = await imageHash(practiceSession);
   const alternateOrigin = {x: practiceOrigin.x - 110 * practiceScale, y: practiceOrigin.y};
   await mouse(practiceSession, 'mouseMoved', alternateOrigin.x, alternateOrigin.y, 0);
   await mouse(practiceSession, 'mousePressed', alternateOrigin.x, alternateOrigin.y, 1);
@@ -198,6 +233,7 @@ try {
   const touchBarCanceled = await imageHash(practiceSession);
   await sleep(250);
   if (await imageHash(practiceSession) !== touchBarCanceled) throw new Error('separate touch cancel fired a practice shot');
+  // Combined drag remains available; the mode change is stored on this device.
   await evaluate(practiceSession, `(() => {
     const control = document.querySelector('#shot-control-mode');
     control.value = '0';
@@ -315,6 +351,12 @@ try {
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, focusOpponent);
   await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
   await until('focus shooter is player one', () => evaluate(focusShooter, 'document.querySelector("#match-status")?.textContent.includes("your turn")'), 20000);
+  // Keep the established combined-gesture interruption regression; separate
+  // mode is checked below on the same match after reselecting the new default.
+  await evaluate(focusShooter, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '0'; control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
   const focusCanvas = JSON.parse(await evaluate(focusShooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const focusScale = Math.min(focusCanvas.width / 1220, focusCanvas.height / 590);
   const focusOrigin = {x: focusCanvas.x + focusCanvas.width / 2 - 295 * focusScale, y: focusCanvas.y + focusCanvas.height / 2};
@@ -417,6 +459,10 @@ try {
   const deadlineScale = Math.min(deadlineCanvas.width / 1220, deadlineCanvas.height / 590);
   const deadlineOrigin = {x: deadlineCanvas.x + deadlineCanvas.width / 2 - 295 * deadlineScale,
     y: deadlineCanvas.y + deadlineCanvas.height / 2};
+  await evaluate(deadlineShooter, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '0'; control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
   await mouse(deadlineShooter, 'mouseMoved', deadlineOrigin.x, deadlineOrigin.y, 0);
   await mouse(deadlineShooter, 'mousePressed', deadlineOrigin.x, deadlineOrigin.y, 1);
   await sleep(120);
@@ -453,6 +499,10 @@ try {
     throw new Error('late release changed canonical state after deadline');
   }
   await send('Target.activateTarget', {targetId: one.targetId});
+  await evaluate(shooter, `(() => {
+    const control = document.querySelector('#shot-control-mode');
+    control.value = '0'; control.dispatchEvent(new Event('change', {bubbles: true}));
+  })()`);
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, shooter);
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, opponent);
   await send('Target.activateTarget', {targetId: two.targetId});

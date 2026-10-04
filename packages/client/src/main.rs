@@ -35,7 +35,7 @@ const BALL_RADIUS: f32 = {
 const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_BAR_X: f32 = 565.0;
 #[cfg(target_arch = "wasm32")]
-static SHOT_CONTROL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static SHOT_CONTROL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
 /// Selects combined drag (0) or separate table aim and power-bar drag (1).
 #[cfg(target_arch = "wasm32")]
@@ -52,7 +52,7 @@ fn shot_control_mode() -> u8 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        0
+        1
     }
 }
 #[cfg(target_arch = "wasm32")]
@@ -194,7 +194,7 @@ impl Default for PrototypeInput {
             active_touch: None,
             pointer_contact: PointerContact::None,
             drag_origin: None,
-            contact_mode: 0,
+            contact_mode: shot_control_mode(),
             interrupted: false,
             #[cfg(target_arch = "wasm32")]
             preview_gesture: 0,
