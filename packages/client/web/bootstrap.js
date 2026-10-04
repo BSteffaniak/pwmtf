@@ -1609,16 +1609,16 @@ const shotControlMode = document.querySelector("#shot-control-mode");
 const shotControlInstructions = document.querySelector("#shot-control-instructions");
 const gameHelp = document.querySelector("#game-help");
 const combinedHelp = "Drag back anywhere on the table to aim and power · Release to shoot";
-const separateHelp = "Drag on the table to aim · Drag the POWER bar down and release to shoot";
+const separateHelp = "Touch a direction on the table to aim · Drag POWER down and release to shoot";
 function applyShotControlMode() {
   const separate = shotControlMode.value === "1";
   wasmModule?.set_shot_control_mode(separate ? 1 : 0);
   gameHelp.textContent = separate ? separateHelp : combinedHelp;
   shotControlInstructions.textContent = separate
-    ? "Drag the cue or anywhere on the table to aim without shooting. Drag the POWER bar down to adjust strength; release a charged pull to shoot. The amber line shows power, not the ball's predicted travel."
+    ? "Touch anywhere on the table to aim from the cue ball toward that point; drag to refine direction without shooting. Drag the POWER bar down to adjust strength; release a charged pull to shoot. The amber line shows power, not the ball's predicted travel."
     : "Start anywhere on the table and drag back to aim and set power together. Short pulls cancel; release a charged pull to shoot. The POWER bar shows your current strength.";
   canvas.setAttribute("aria-label", separate
-    ? "Pool table. Drag to aim without shooting; drag the POWER bar down and release to shoot."
+    ? "Pool table. Touch a point to aim from the cue ball toward it; drag to refine. Drag the POWER bar down and release to shoot."
     : "Pool table. Drag anywhere on the table to aim and power the shot; release to shoot.");
 }
 shotControlMode.addEventListener("change", applyShotControlMode);

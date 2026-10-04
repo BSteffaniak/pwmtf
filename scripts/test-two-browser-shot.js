@@ -173,13 +173,12 @@ try {
     control.value = '1';
     control.dispatchEvent(new Event('change', {bubbles: true}));
   })()`);
-  const alternateOrigin = {x: practiceOrigin.x, y: practiceOrigin.y};
+  const alternateOrigin = {x: practiceOrigin.x - 110 * practiceScale, y: practiceOrigin.y};
   await mouse(practiceSession, 'mouseMoved', alternateOrigin.x, alternateOrigin.y, 0);
   await mouse(practiceSession, 'mousePressed', alternateOrigin.x, alternateOrigin.y, 1);
-  await sleep(120);
-  await mouse(practiceSession, 'mouseMoved', alternateOrigin.x - 110 * practiceScale, alternateOrigin.y, 1);
-  await until('separate aim drag changes cue without power', async () => (await imageHash(practiceSession)) !== practiceIdle);
-  await mouse(practiceSession, 'mouseReleased', alternateOrigin.x - 110 * practiceScale, alternateOrigin.y, 0);
+  await until('separate aim contact left of cue changes cue immediately', async () => (await imageHash(practiceSession)) !== practiceIdle);
+  await mouse(practiceSession, 'mouseMoved', alternateOrigin.x + 25 * practiceScale, alternateOrigin.y, 1);
+  await mouse(practiceSession, 'mouseReleased', alternateOrigin.x + 25 * practiceScale, alternateOrigin.y, 0);
   const bar = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 + 565 * practiceScale,
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 0);
@@ -356,13 +355,22 @@ try {
     control.value = '1'; control.dispatchEvent(new Event('change', {bubbles: true}));
   })()`);
   const separateBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
-  await mouse(focusShooter, 'mousePressed', focusOrigin.x, focusOrigin.y, 1);
+  // Contact location relative to the cue ball must determine aim immediately,
+  // regardless of the direction in which the pointer subsequently moves.
+  const leftOfCue = {x: focusOrigin.x - 110, y: focusOrigin.y};
+  const rightOfCue = {x: focusOrigin.x + 120, y: focusOrigin.y};
+  await mouse(focusShooter, 'mouseMoved', leftOfCue.x, leftOfCue.y, 0);
+  await mouse(focusShooter, 'mousePressed', leftOfCue.x, leftOfCue.y, 1);
+  const leftAim = await until('opponent sees contact left of cue ball aim left immediately', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.aim > 4000 && value.aim < 6000));
+  await mouse(focusShooter, 'mouseMoved', leftOfCue.x + 25, leftOfCue.y, 1);
   await sleep(120);
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x - 110, focusOrigin.y, 1);
-  await sleep(140);
-  const aimed = await until('opponent sees separate aim without charge', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.aim === 0));
-  await mouse(focusShooter, 'mouseReleased', focusOrigin.x - 110, focusOrigin.y, 0);
+  const afterLeft = previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).filter(value => !value.cancel && value.sequence > leftAim.sequence);
+  if (afterLeft.some(value => value.aim < 4000 || value.aim > 6000)) throw new Error('moving right while left of cue ball reversed aim');
+  await mouse(focusShooter, 'mouseMoved', rightOfCue.x, rightOfCue.y, 1);
+  const rightAim = await until('opponent sees pointer cross to right of cue ball', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.sequence > leftAim.sequence && (value.aim < 800 || value.aim > 9200)));
+  await mouse(focusShooter, 'mouseMoved', leftOfCue.x, leftOfCue.y, 1);
+  const aimed = await until('opponent sees pointer return left of cue ball', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.sequence > rightAim.sequence && value.aim > 4000 && value.aim < 6000));
+  await mouse(focusShooter, 'mouseReleased', leftOfCue.x, leftOfCue.y, 0);
   await send('Target.activateTarget', {targetId: focusOpponentPage.targetId});
   const separateAimImage = await imageHash(focusOpponent);
   const separateBar = {x: focusCanvas.x + focusCanvas.width / 2 + 565 * focusScale,

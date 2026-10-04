@@ -1033,13 +1033,12 @@ fn update_power_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
     };
 }
 
-fn update_aim_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
-    let Some(origin) = input.drag_origin else {
-        return;
-    };
-    let displacement = pointer_world(cursor, size) - origin;
-    if displacement.is_finite() && displacement.length() > DRAG_DEAD_ZONE {
-        input.aim_angle = (-displacement).to_angle();
+fn update_aim_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2, cue_ball: Vec2) {
+    let direction = pointer_world(cursor, size) - cue_ball;
+    // Separate controls point from the cue ball toward the contact, rather
+    // than reversing the distance moved since the contact began.
+    if direction.is_finite() && direction.length() > DRAG_DEAD_ZONE {
+        input.aim_angle = direction.to_angle();
     }
     input.power = 0.0;
 }
@@ -1049,6 +1048,7 @@ fn update_from_pointer(
     input: &mut PrototypeInput,
     cursor: Vec2,
     window_size: Vec2,
+    cue_ball: Option<Vec2>,
     placement_sent_during_contact: &mut bool,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
@@ -1075,7 +1075,9 @@ fn update_from_pointer(
     }
     if input.pointer_contact == PointerContact::Aim && input.drag_origin.is_some() {
         if input.contact_mode == 1 {
-            update_aim_drag(input, cursor, window_size);
+            if let Some(cue_ball) = cue_ball {
+                update_aim_drag(input, cursor, window_size, cue_ball);
+            }
         } else {
             update_drag(input, cursor, window_size);
         }
@@ -1354,6 +1356,7 @@ fn update_input(
         &mut input,
         cursor,
         Vec2::new(window.width(), window.height()),
+        presentation.target.get(&0).copied(),
         &mut placement_sent_during_contact,
     );
     #[cfg(target_arch = "wasm32")]
@@ -1731,33 +1734,58 @@ mod tests {
                 PointerContact::Power
             );
             assert_eq!(classify_pointer_contact(bar, size, 0), PointerContact::Aim);
+            let cue_ball = Vec2::new(-55.0, 0.0);
             let mut input = PrototypeInput {
                 contact_mode: 1,
                 pointer_contact: PointerContact::Aim,
-                drag_origin: Some(Vec2::ZERO),
+                drag_origin: Some(Vec2::new(-165.0, 0.0)),
                 ..Default::default()
             };
+            let left = size / 2.0 + Vec2::new(-165.0, 0.0) * scale;
+            // Contact position, not displacement, controls aim. Pressing on the
+            // left of the cue ball immediately points left, even without motion.
+            update_from_pointer(&mut input, left, size, Some(cue_ball), &mut false);
+            assert!((input.aim_angle.abs() - std::f32::consts::PI).abs() < 0.001);
             update_from_pointer(
                 &mut input,
-                size / 2.0 + Vec2::new(-110.0, 0.0) * scale,
+                left + Vec2::new(25.0, 0.0) * scale,
                 size,
+                Some(cue_ball),
+                &mut false,
+            );
+            assert!((input.aim_angle.abs() - std::f32::consts::PI).abs() < 0.001);
+            update_from_pointer(
+                &mut input,
+                size / 2.0 + Vec2::new(55.0, 0.0) * scale,
+                size,
+                Some(cue_ball),
                 &mut false,
             );
             assert!(input.aim_angle.abs() < 0.001);
             assert!(input.power.abs() < f32::EPSILON);
             assert!(!contact_is_charged(&input));
             let angle = input.aim_angle;
+            // Crossing the cue ball's center holds the last valid direction.
+            update_from_pointer(
+                &mut input,
+                size / 2.0 + cue_ball * scale,
+                size,
+                Some(cue_ball),
+                &mut false,
+            );
+            assert!((input.aim_angle - angle).abs() < f32::EPSILON);
             input.pointer_contact = PointerContact::Power;
             input.drag_origin = Some(Vec2::new(POWER_BAR_X, 0.0));
             update_from_pointer(
                 &mut input,
                 bar + Vec2::new(0.0, 100.0) * scale,
                 size,
+                Some(cue_ball),
                 &mut false,
             );
             assert!(input.power > 0.0 && contact_is_charged(&input));
             assert!((input.aim_angle - angle).abs() < f32::EPSILON);
-            update_from_pointer(&mut input, bar, size, &mut false);
+            update_from_pointer(&mut input, bar, size, Some(cue_ball), &mut false);
             assert!(input.power.abs() < f32::EPSILON);
             assert!(!contact_is_charged(&input));
             input.release_active_touch(true);
