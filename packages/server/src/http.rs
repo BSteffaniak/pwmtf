@@ -48,7 +48,7 @@ const INVITATION_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_JSON_BYTES: usize = 1_024;
 const CACHE_CONTROL_DYNAMIC: &str = "no-store";
 const CACHE_CONTROL_ASSET: &str = "no-cache";
-const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'";
 const PERMISSIONS_POLICY: &str = "camera=(), geolocation=(), microphone=()";
 const READINESS_MAX_AGE_MS: u64 = 5_000;
 
@@ -564,7 +564,7 @@ async fn google_start(
     .await?;
     let oidc = state.oidc.as_ref().ok_or(TransportError::MatchNotFound)?;
     let location = oidc.authorization_url(attempt.attempt());
-    let mut response = Redirect::temporary(&location).into_response();
+    let mut response = Redirect::to(&location).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&oidc_binding_cookie(&attempt))

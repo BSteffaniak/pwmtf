@@ -1026,7 +1026,17 @@ async function redeemInvitationFromUrl() {
 }
 
 googleSignIn.addEventListener("submit", () => {
-  googleSignIn.querySelector("button").disabled = true;
+  const button = googleSignIn.querySelector("button");
+  button.disabled = true;
+  // A blocked or abandoned navigation leaves this document in place; never
+  // strand the only sign-in control in a disabled state.
+  window.setTimeout(() => {
+    button.disabled = false;
+  }, 5_000);
+});
+
+window.addEventListener("pageshow", () => {
+  googleSignIn.querySelector("button").disabled = false;
 });
 
 developmentSignIn.addEventListener("submit", async (event) => {

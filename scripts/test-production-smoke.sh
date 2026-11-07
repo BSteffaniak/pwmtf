@@ -133,8 +133,8 @@ fi
     "$canonical_origin/auth/google/start"
 status=$(awk 'NR == 1 { print $2 }' "$response_headers")
 location=$(awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$response_headers")
-if [ "$status" != 307 ]; then
-    printf '%s\n' "Google authorization start returned $status instead of 307" >&2
+if [ "$status" != 303 ]; then
+    printf '%s\n' "Google authorization start returned $status instead of 303" >&2
     exit 1
 fi
 case "$location" in
