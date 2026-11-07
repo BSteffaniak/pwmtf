@@ -1,530 +1,338 @@
-//! WASM-to-browser WebSocket bridge with bounded reconnect lifecycle.
+//! Thin web-sys glue for [`SessionTransport`]: owns the `WebSocket`, the
+//! single wake-up timer, and the JavaScript event listener. All protocol and
+//! session decisions live in the pure state machine.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
-use pwmtf_protocol::{PREVIEW_MARKER, ShotPreview};
+use js_sys::{ArrayBuffer, Function, Uint8Array};
+use pwmtf_protocol::ShotPreview;
+use wasm_bindgen::{JsCast as _, JsValue, closure::Closure};
+use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
-use js_sys::{ArrayBuffer, Uint8Array};
-use wasm_bindgen::{JsCast as _, closure::Closure};
-use web_sys::{BinaryType, CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
-
-use crate::transport::{BrowserTransport, ConnectionStatus};
+use crate::transport::{SessionTransport, TransportAction, TransportClientError};
 
 thread_local! {
+    static TRANSPORT: RefCell<SessionTransport> = RefCell::new(SessionTransport::default());
     static SOCKET: RefCell<Option<WebSocket>> = const { RefCell::new(None) };
-    static TRANSPORT: RefCell<BrowserTransport> = RefCell::new(BrowserTransport::default());
-    static REMOTE_PREVIEW: RefCell<Option<(ShotPreview, f64)>> = const { RefCell::new(None) };
-    static LAST_SENT: RefCell<Option<f64>> = const { RefCell::new(None) };
-    static LAST_RECEIVED_SEQUENCE: RefCell<Option<(u64, u32)>> = const { RefCell::new(None) };
-    static PENDING_CANCEL: RefCell<Option<(ShotPreview, f64)>> = const { RefCell::new(None) };
-    static REMOTE_LAST: RefCell<Option<(u64, u64, u32, bool)>> = const { RefCell::new(None) };
-    static ACTIVE_PREVIEW: RefCell<Option<ShotPreview>> = const { RefCell::new(None) };
-    static INTERRUPTED_GESTURE: RefCell<Option<u32>> = const { RefCell::new(None) };
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
+    static LISTENER: RefCell<Option<Function>> = const { RefCell::new(None) };
+    static TIMER: Cell<Option<i32>> = const { Cell::new(None) };
+    static TIMER_CALLBACK: RefCell<Option<Closure<dyn FnMut()>>> = const { RefCell::new(None) };
+    static DRIVING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Monotonic browser clock in milliseconds; never use `std::time::Instant` on WASM.
+#[must_use]
 pub fn monotonic_millis() -> f64 {
     web_sys::window()
         .and_then(|window| window.performance())
         .map_or(0.0, |performance| performance.now())
 }
 
-/// Connects the browser socket to a server-authorized match subscription URL.
-///
-/// The URL must be same-origin `ws:`/`wss:` and include server-owned match
-/// subscription identifiers. Authentication remains in the secure session cookie.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception for malformed URLs or socket construction failure.
-pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
-    disconnect();
-    TRANSPORT.with(|transport| transport.borrow_mut().connecting());
-    let socket = WebSocket::new(url)?;
-    socket.set_binary_type(BinaryType::Arraybuffer);
+fn wall_millis() -> f64 {
+    js_sys::Date::now()
+}
 
-    let opened_socket = socket.clone();
+/// Reads the session state machine.
+pub fn with<R>(f: impl FnOnce(&SessionTransport) -> R) -> R {
+    TRANSPORT.with(|transport| f(&transport.borrow()))
+}
+
+/// Mutates the session state machine, then performs its queued actions,
+/// delivers its events, and reschedules the wake-up timer.
+pub fn with_mut<R>(f: impl FnOnce(&mut SessionTransport) -> R) -> R {
+    let result = TRANSPORT.with(|transport| f(&mut transport.borrow_mut()));
+    drive();
+    result
+}
+
+/// Registers the page listener, called as `callback(name, detailJson)`, and
+/// replays the current connection and match state to it.
+pub fn set_listener(callback: Function) {
+    LISTENER.with(|listener| *listener.borrow_mut() = Some(callback));
+    with_mut(SessionTransport::replay_state_events);
+}
+
+fn drive() {
+    // Listener callbacks may re-enter exports; the outer loop drains their work.
+    if DRIVING.with(|driving| driving.replace(true)) {
+        return;
+    }
+    loop {
+        let (actions, events) = TRANSPORT.with(|transport| {
+            let mut transport = transport.borrow_mut();
+            (transport.take_actions(), transport.take_events())
+        });
+        if actions.is_empty() && events.is_empty() {
+            break;
+        }
+        for action in actions {
+            perform(action);
+        }
+        let listener = LISTENER.with(|listener| listener.borrow().clone());
+        if let Some(listener) = listener {
+            for event in events {
+                let _ = listener.call2(
+                    &JsValue::NULL,
+                    &JsValue::from_str(event.name),
+                    &JsValue::from_str(&event.detail),
+                );
+            }
+        }
+    }
+    DRIVING.with(|driving| driving.set(false));
+    reschedule();
+}
+
+fn perform(action: TransportAction) {
+    match action {
+        TransportAction::Open => {
+            close_socket();
+            if open_socket().is_err() {
+                TRANSPORT.with(|transport| {
+                    transport.borrow_mut().socket_closed(monotonic_millis());
+                });
+            }
+        }
+        TransportAction::Close => close_socket(),
+        TransportAction::Send(frame) => {
+            let sent = SOCKET.with(|socket| {
+                socket
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|socket| socket.send_with_u8_array(&frame).is_ok())
+            });
+            if !sent {
+                TRANSPORT.with(|transport| {
+                    transport.borrow_mut().socket_closed(monotonic_millis());
+                });
+            }
+        }
+    }
+}
+
+fn socket_url() -> Result<String, JsValue> {
+    let location = web_sys::window()
+        .ok_or_else(|| JsValue::from_str("window is unavailable"))?
+        .location();
+    let scheme = if location.protocol()? == "https:" {
+        "wss:"
+    } else {
+        "ws:"
+    };
+    Ok(format!("{scheme}//{}/ws", location.host()?))
+}
+
+fn open_socket() -> Result<(), JsValue> {
+    let socket = WebSocket::new(&socket_url()?)?;
+    socket.set_binary_type(BinaryType::Arraybuffer);
+    let generation = GENERATION.with(|value| {
+        let next = value.get().wrapping_add(1);
+        value.set(next);
+        next
+    });
+    let current = move || GENERATION.with(Cell::get) == generation;
+
     let on_open = Closure::<dyn FnMut(Event)>::new(move |_| {
-        let offer = TRANSPORT.with(|transport| transport.borrow_mut().opened());
-        if opened_socket.send_with_str(&offer).is_err() {
-            TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-            let _ = opened_socket.close();
+        if current() {
+            with_mut(|transport| transport.socket_opened(monotonic_millis(), wall_millis()));
         }
     });
     socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
     on_open.forget();
 
-    let message_socket = socket.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-        if let Some(text) = event.data().as_string() {
-            let result = TRANSPORT.with(|transport| {
-                let mut transport = transport.borrow_mut();
-                if transport.status() == ConnectionStatus::Ready {
-                    if text == "rejected" {
-                        transport.command_rejected();
-                    }
-                    Ok(())
-                } else {
-                    transport.negotiated(&text)
-                }
-            });
-            if result.is_err() {
-                TRANSPORT.with(|transport| {
-                    let mut transport = transport.borrow_mut();
-                    if transport.status() != ConnectionStatus::Backoff {
-                        transport.disconnected();
-                    }
-                });
-                let _ = message_socket.close();
+        if !current() {
+            return;
+        }
+        let now = monotonic_millis();
+        match event.data().dyn_into::<ArrayBuffer>() {
+            Ok(buffer) => {
+                let bytes = Uint8Array::new(&buffer).to_vec();
+                with_mut(|transport| transport.receive(&bytes, now));
             }
-            return;
-        }
-        let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() else {
-            TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-            let _ = message_socket.close();
-            return;
-        };
-        let bytes = Uint8Array::new(&buffer).to_vec();
-        if bytes.first() == Some(&PREVIEW_MARKER) {
-            if let Ok(preview) = ShotPreview::from_bytes(&bytes) {
-                let eligible = TRANSPORT.with(|transport| {
-                    let transport = transport.borrow();
-                    transport.status() == ConnectionStatus::Ready
-                        && !transport.accepts_active_player_command()
-                        && !transport.has_pending_prediction()
-                        && transport.authoritative_state().is_some_and(|state| {
-                            matches!(state.status(), pwmtf_game_domain::MatchStatus::InProgress)
-                                && transport
-                                    .local_player()
-                                    .is_some_and(|seat| seat != state.active_player())
-                        })
-                        && transport.prediction().is_some_and(|prediction| {
-                            prediction.authoritative_revision() == preview.revision
-                        })
-                });
-                if eligible {
-                    let fresh = LAST_RECEIVED_SEQUENCE.with(|last| {
-                        let mut last = last.borrow_mut();
-                        if last.is_some_and(|(revision, sequence)| {
-                            revision == preview.revision && preview.sequence <= sequence
-                        }) {
-                            false
-                        } else {
-                            *last = Some((preview.revision, preview.sequence));
-                            true
-                        }
-                    });
-                    if !fresh {
-                        return;
-                    }
-                    let permitted = REMOTE_LAST.with(|last| {
-                        last.borrow()
-                            .is_none_or(|(revision, gesture, _, canceled)| {
-                                revision != preview.revision
-                                    || preview.cancel
-                                    || gesture != preview.gesture
-                                    || !canceled
-                            })
-                    });
-                    if !permitted {
-                        return;
-                    }
-                    REMOTE_LAST.with(|last| {
-                        *last.borrow_mut() = Some((
-                            preview.revision,
-                            preview.gesture,
-                            preview.sequence,
-                            preview.cancel,
-                        ))
-                    });
-                    REMOTE_PREVIEW.with(|stored| {
-                        *stored.borrow_mut() = Some((preview, monotonic_millis()));
-                    });
-                }
-            }
-            return;
-        }
-        let old_revision = TRANSPORT.with(|transport| {
-            transport
-                .borrow()
-                .prediction()
-                .map(crate::prediction::PredictionState::authoritative_revision)
-        });
-        let result = TRANSPORT.with(|transport| transport.borrow_mut().receive_snapshot(&bytes));
-        let new_revision = TRANSPORT.with(|transport| {
-            transport
-                .borrow()
-                .prediction()
-                .map(crate::prediction::PredictionState::authoritative_revision)
-        });
-        if old_revision != new_revision || result.is_err() {
-            REMOTE_PREVIEW.with(|stored| *stored.borrow_mut() = None);
-            REMOTE_LAST.with(|last| *last.borrow_mut() = None);
-            LAST_RECEIVED_SEQUENCE.with(|last| *last.borrow_mut() = None);
-        }
-        if result.is_err() {
-            TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-            let _ = message_socket.close();
+            // Text frames are a protocol violation in session version 2.
+            Err(_) => with_mut(|transport| transport.protocol_violation(now)),
         }
     });
     socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     on_message.forget();
 
-    let on_error = Closure::<dyn FnMut(ErrorEvent)>::new(move |_| {
-        TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-        REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
-        REMOTE_LAST.with(|last| *last.borrow_mut() = None);
-    });
-    socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-    on_error.forget();
-
     let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
-        TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-        REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
-        REMOTE_LAST.with(|last| *last.borrow_mut() = None);
-        SOCKET.with(|socket| socket.borrow_mut().take());
+        if current() {
+            SOCKET.with(|socket| socket.borrow_mut().take());
+            with_mut(|transport| transport.socket_closed(monotonic_millis()));
+        }
     });
     socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
     on_close.forget();
+
+    let on_error = Closure::<dyn FnMut(Event)>::new(move |_| {
+        if current() {
+            with_mut(|transport| transport.socket_closed(monotonic_millis()));
+        }
+    });
+    socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+    on_error.forget();
 
     SOCKET.with(|stored| *stored.borrow_mut() = Some(socket));
     Ok(())
 }
 
-/// Returns the current short-lived opponent planning state, if still valid.
-pub fn remote_preview() -> Option<ShotPreview> {
-    REMOTE_PREVIEW.with(|stored| {
-        let mut stored = stored.borrow_mut();
-        let valid = TRANSPORT.with(|transport| {
-            let transport = transport.borrow();
-            transport.status() == ConnectionStatus::Ready
-                && !transport.has_pending_prediction()
-                && transport.authoritative_state().is_some_and(|state| {
-                    matches!(state.status(), pwmtf_game_domain::MatchStatus::InProgress)
-                        && transport
-                            .local_player()
-                            .is_some_and(|seat| seat != state.active_player())
-                })
-                && stored.as_ref().is_some_and(|(value, _)| {
-                    transport.prediction().is_some_and(|prediction| {
-                        prediction.authoritative_revision() == value.revision
-                    })
-                })
+fn close_socket() {
+    // Invalidate the old socket's callbacks before closing it.
+    GENERATION.with(|value| value.set(value.get().wrapping_add(1)));
+    if let Some(socket) = SOCKET.with(|socket| socket.borrow_mut().take()) {
+        socket.set_onopen(None);
+        socket.set_onmessage(None);
+        socket.set_onerror(None);
+        socket.set_onclose(None);
+        let _ = socket.close();
+    }
+}
+
+fn reschedule() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if let Some(handle) = TIMER.with(Cell::take) {
+        window.clear_timeout_with_handle(handle);
+    }
+    let Some(wakeup) = with(SessionTransport::next_wakeup) else {
+        return;
+    };
+    TIMER_CALLBACK.with(|callback| {
+        let mut callback = callback.borrow_mut();
+        let callback = callback.get_or_insert_with(|| {
+            Closure::<dyn FnMut()>::new(|| {
+                TIMER.with(Cell::take);
+                with_mut(|transport| transport.poll(monotonic_millis(), wall_millis()));
+            })
         });
-        if !valid
-            || stored
-                .as_ref()
-                .is_some_and(|(_, at)| monotonic_millis() - *at > 650.0)
-        {
-            *stored = None;
+        #[allow(clippy::cast_possible_truncation)]
+        let delay = (wakeup - monotonic_millis()).clamp(0.0, 60_000.0).ceil() as i32;
+        if let Ok(handle) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.as_ref().unchecked_ref(),
+            delay,
+        ) {
+            TIMER.with(|timer| timer.set(Some(handle)));
         }
-        stored
-            .as_ref()
-            .and_then(|(value, _)| (!value.cancel).then_some(*value))
-    })
+    });
+}
+
+fn js_error(error: &TransportClientError) -> JsValue {
+    JsValue::from_str(&error.to_string())
+}
+
+/// Predicts and sends one cue-ball placement.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception when the session refuses the command.
+pub fn submit_cue_ball_placement(
+    command_id: pwmtf_protocol::CommandId,
+    position: pwmtf_game_domain::Vector,
+) -> Result<(), JsValue> {
+    with_mut(|transport| transport.submit_cue_ball_placement(command_id, position))
+        .map_err(|error| js_error(&error))
+}
+
+/// Predicts and sends one shot, starting the shooter's playback.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception when the session refuses the command.
+pub fn submit_shot(
+    command_id: pwmtf_protocol::CommandId,
+    shot: pwmtf_game_domain::VersionedShotCommand,
+    called_pocket: Option<pwmtf_game_domain::PocketId>,
+) -> Result<(), JsValue> {
+    with_mut(|transport| transport.submit_shot(command_id, shot, called_pocket))
+        .map_err(|error| js_error(&error))
+}
+
+/// Predicts and sends one explicit concession.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception when the session refuses the command.
+pub fn submit_concession(
+    command_id: pwmtf_protocol::CommandId,
+    player: pwmtf_game_domain::Player,
+) -> Result<(), JsValue> {
+    with_mut(|transport| transport.submit_concession(command_id, player))
+        .map_err(|error| js_error(&error))
+}
+
+/// Returns the opponent's current planning preview, if still valid.
+#[must_use]
+pub fn remote_preview() -> Option<ShotPreview> {
+    let now = monotonic_millis();
+    TRANSPORT.with(|transport| transport.borrow_mut().remote_preview(now))
 }
 
 /// Sends one locally quantized, non-authoritative planning update.
 ///
 /// # Errors
-/// Returns a JavaScript exception if the socket is unavailable.
-pub fn send_preview(value: ShotPreview) -> Result<(), wasm_bindgen::JsValue> {
-    let ready = TRANSPORT.with(|transport| transport.borrow().accepts_active_player_command());
-    if !ready {
-        return Err(wasm_bindgen::JsValue::from_str(
-            "shot preview is not permitted",
-        ));
-    }
-    if !value.cancel {
-        PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
-        INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow_mut() = None);
-    }
-    let frame = value.to_bytes();
-    send_command(&frame)?;
-    LAST_SENT.with(|sent| *sent.borrow_mut() = Some(monotonic_millis()));
-    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = (!value.cancel).then_some(value));
-    if value.cancel {
-        PENDING_CANCEL.with(|pending| *pending.borrow_mut() = Some((value, monotonic_millis())));
-    }
-    Ok(())
+///
+/// Returns a JavaScript exception unless the local seat may act now.
+pub fn send_preview(value: ShotPreview) -> Result<(), JsValue> {
+    let now = monotonic_millis();
+    with_mut(|transport| transport.send_preview(value, now)).map_err(|error| js_error(&error))
 }
 
-/// Cancels a charged preview before the browser suspends rendering on blur or
-/// visibility loss. This does not submit a gameplay command.
+/// Repeats the latest preview at a bounded cadence.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception without a subscribed match.
+pub fn resend_preview(value: ShotPreview) -> Result<bool, JsValue> {
+    let now = monotonic_millis();
+    with_mut(|transport| transport.resend_preview(value, now)).map_err(|error| js_error(&error))
+}
+
+/// Cancels a charged preview before the browser suspends rendering.
 pub fn cancel_preview_on_interruption() {
-    let value = ACTIVE_PREVIEW.with(|active| active.borrow_mut().take());
-    if let Some(mut value) = value {
-        INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow_mut() = Some(value.sequence));
-        value.cancel = true;
-        value.sequence = value.sequence.saturating_add(1);
-        // A hidden tab may close its socket immediately after this send.
-        // Expiry remains the fallback when transport is unavailable.
-        let _ = send_preview(value);
-    }
+    let now = monotonic_millis();
+    with_mut(|transport| transport.cancel_preview_on_interruption(now));
 }
 
-/// Returns the interrupted preview sequence until the held pointer is
-/// released. Callers must not reuse that sequence for a new gesture.
+/// Retransmits a pending cancel; returns the transmitted sequence.
 #[must_use]
-pub fn interrupted_preview_sequence() -> Option<u32> {
-    INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow())
-}
-
-/// Clears the interruption latch after the held pointer is fully released.
-pub fn rearm_interrupted_gesture() {
-    INTERRUPTED_GESTURE.with(|interrupted| *interrupted.borrow_mut() = None);
-}
-
-/// Repeats the latest preview at a bounded cadence so an idle drag stays visible.
-///
-/// # Errors
-/// Returns a JavaScript exception if the socket cannot send the frame.
-pub fn resend_preview(value: ShotPreview) -> Result<bool, wasm_bindgen::JsValue> {
-    if !TRANSPORT.with(|transport| transport.borrow().accepts_active_player_command()) {
-        return Ok(false);
-    }
-    let should_send = LAST_SENT.with(|sent| {
-        sent.borrow()
-            .is_none_or(|at| monotonic_millis() - at >= 45.0)
-    });
-    if !should_send {
-        return Ok(false);
-    }
-    send_command(&value.to_bytes())?;
-    LAST_SENT.with(|sent| *sent.borrow_mut() = Some(monotonic_millis()));
-    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = Some(value));
-    Ok(true)
-}
-
-/// Retransmits a cancel briefly to overcome packet loss, then expires.
-/// Returns the transmitted sequence so the next gesture cannot reuse it.
 pub fn retry_pending_cancel() -> Option<u32> {
-    let cancel = PENDING_CANCEL.with(|pending| {
-        let mut pending = pending.borrow_mut();
-        if pending
-            .as_ref()
-            .is_some_and(|(_, started)| monotonic_millis() - *started > 600.0)
-        {
-            *pending = None;
-            return None;
-        }
-        if pending.as_ref().is_some_and(|_| {
-            LAST_SENT.with(|sent| {
-                sent.borrow()
-                    .is_some_and(|at| monotonic_millis() - at > 65.0)
-            })
-        }) {
-            pending.take()
-        } else {
-            None
-        }
-    });
-    if let Some((mut cancel, started)) = cancel {
-        cancel.sequence = cancel.sequence.saturating_add(1);
-        if send_preview(cancel).is_ok() {
-            PENDING_CANCEL.with(|pending| *pending.borrow_mut() = Some((cancel, started)));
-            return Some(cancel.sequence);
-        }
-    }
-    None
+    let now = monotonic_millis();
+    with_mut(|transport| transport.retry_pending_cancel(now))
 }
 
-/// Drops a canceled preview when a durable shot supersedes it.
-pub fn forget_pending_cancel() {
-    PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
-}
-
-/// Sends one bounded, already-authorized frame.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception unless the protocol lifecycle is ready or
-/// browser socket transmission fails.
-pub fn send_command(frame: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
-    if TRANSPORT.with(|transport| transport.borrow().status()) != ConnectionStatus::Ready {
-        return Err(wasm_bindgen::JsValue::from_str("PWMTF socket is not ready"));
-    }
-    SOCKET.with(|socket| {
-        socket
-            .borrow()
-            .as_ref()
-            .ok_or_else(|| wasm_bindgen::JsValue::from_str("PWMTF socket is disconnected"))?
-            .send_with_u8_array(frame)
-    })
-}
-
-fn send_predicted_frame(frame: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
-    let result = send_command(frame);
-    if result.is_err() {
-        TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-    }
-    result
-}
-
-/// Predicts and sends one bounded cue-ball placement command.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception unless the protocol lifecycle is ready,
-/// prediction fails, or browser socket transmission fails.
-pub fn predict_and_send_cue_ball_placement(
-    command_id: pwmtf_protocol::CommandId,
-    position: pwmtf_game_domain::Vector,
-) -> Result<(), wasm_bindgen::JsValue> {
-    let frame = TRANSPORT
-        .with(|transport| {
-            transport
-                .borrow_mut()
-                .predict_cue_ball_placement(command_id, position)
-                .map(pwmtf_protocol::CommandEnvelope::to_bytes)
-        })
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
-    send_predicted_frame(&frame)
-}
-
-/// Predicts and sends one bounded shot command.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception unless the protocol lifecycle is ready,
-/// prediction fails, or browser socket transmission fails.
-pub fn predict_and_send_shot(
-    command_id: pwmtf_protocol::CommandId,
-    shot: pwmtf_game_domain::VersionedShotCommand,
-    called_pocket: Option<pwmtf_game_domain::PocketId>,
-) -> Result<(), wasm_bindgen::JsValue> {
-    let frame = TRANSPORT
-        .with(|transport| {
-            transport
-                .borrow_mut()
-                .predict_shot(command_id, shot, called_pocket)
-                .map(pwmtf_protocol::CommandEnvelope::to_bytes)
-        })
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
-    PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
-    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = None);
-    LAST_SENT.with(|sent| *sent.borrow_mut() = None);
-    send_predicted_frame(&frame)
-}
-
-/// Predicts and sends one explicit concession command.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception unless the protocol lifecycle is ready,
-/// prediction fails, or browser socket transmission fails.
-pub fn predict_and_send_concession(
-    command_id: pwmtf_protocol::CommandId,
-    player: pwmtf_game_domain::Player,
-) -> Result<(), wasm_bindgen::JsValue> {
-    let frame = TRANSPORT
-        .with(|transport| {
-            transport
-                .borrow_mut()
-                .predict_concession(command_id, player)
-                .map(pwmtf_protocol::CommandEnvelope::to_bytes)
-        })
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
-    send_predicted_frame(&frame)
-}
-
-/// Closes and forgets the current browser socket and predicted in-flight work.
-pub fn disconnect() {
-    SOCKET.with(|socket| {
-        if let Some(socket) = socket.borrow_mut().take() {
-            socket.set_onopen(None);
-            socket.set_onmessage(None);
-            socket.set_onerror(None);
-            socket.set_onclose(None);
-            let _ = socket.close();
-        }
-    });
-    TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
-    REMOTE_PREVIEW.with(|preview| *preview.borrow_mut() = None);
-    PENDING_CANCEL.with(|pending| *pending.borrow_mut() = None);
-    ACTIVE_PREVIEW.with(|active| *active.borrow_mut() = None);
-    REMOTE_LAST.with(|last| *last.borrow_mut() = None);
-    LAST_RECEIVED_SEQUENCE.with(|last| *last.borrow_mut() = None);
-    LAST_SENT.with(|sent| *sent.borrow_mut() = None);
-}
-
-/// Returns whether presentation has one unresolved predicted command.
+/// Advances shot playback to the current frame; `true` once when it ends.
 #[must_use]
-pub fn has_pending_prediction() -> bool {
-    TRANSPORT.with(|transport| transport.borrow().has_pending_prediction())
+pub fn advance_playback() -> bool {
+    let now = monotonic_millis();
+    with_mut(|transport| transport.advance_playback(now))
 }
 
-/// Sets the participant seat derived from authenticated durable membership.
-pub fn set_local_player(player: pwmtf_game_domain::Player) {
-    TRANSPORT.with(|transport| transport.borrow_mut().set_local_player(player));
-}
-
-/// Returns whether the local participant may submit active-player commands.
+/// Returns whether the local seat may shoot or place now.
 #[must_use]
 pub fn accepts_active_player_command() -> bool {
-    TRANSPORT.with(|transport| transport.borrow().accepts_active_player_command())
+    with(SessionTransport::accepts_active_player_command)
 }
 
-/// Returns and clears whether the authoritative server rejected the latest command.
-#[must_use]
-pub fn take_command_rejected() -> bool {
-    TRANSPORT.with(|transport| transport.borrow_mut().take_command_rejected())
-}
-
-/// Returns whether the authoritative match accepts live gameplay commands.
-#[must_use]
-pub fn accepts_gameplay_commands() -> bool {
-    TRANSPORT.with(|transport| transport.borrow().accepts_gameplay_commands())
-}
-
-/// Returns whether authoritative state permits cue-ball placement.
+/// Returns whether predicted state grants ball-in-hand.
 #[must_use]
 pub fn ball_in_hand() -> bool {
-    TRANSPORT.with(|transport| {
-        transport
-            .borrow()
-            .prediction()
-            .is_some_and(|prediction| prediction.predicted().ball_in_hand())
-    })
+    with(SessionTransport::ball_in_hand)
 }
 
-/// Returns the latest authoritative match presentation facts.
-#[must_use]
-pub fn authoritative_match_info() -> Option<(
-    pwmtf_game_domain::Player,
-    Option<pwmtf_game_domain::MatchOutcome>,
-)> {
-    TRANSPORT.with(|transport| {
-        let transport = transport.borrow();
-        let state = transport.authoritative_state()?;
-        let outcome = match state.status() {
-            pwmtf_game_domain::MatchStatus::InProgress => None,
-            pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
-        };
-        Some((state.active_player(), outcome))
-    })
-}
-
-/// Returns the authoritative revision after snapshot initialization.
+/// Returns the latest authoritative revision.
 #[must_use]
 pub fn authoritative_revision() -> Option<u64> {
-    TRANSPORT.with(|transport| {
-        transport
-            .borrow()
-            .prediction()
-            .map(crate::prediction::PredictionState::authoritative_revision)
-    })
+    with(SessionTransport::authoritative_revision)
 }
 
-/// Returns the current canonical/predicted state checksum after initialization.
+/// Returns the predicted state's checksum.
 #[must_use]
 pub fn predicted_checksum() -> Option<u64> {
-    TRANSPORT.with(|transport| {
-        transport
-            .borrow()
-            .prediction()
-            .map(|prediction| prediction.predicted().checksum())
-    })
+    with(SessionTransport::predicted_checksum)
 }
 
 /// Returns an isolated solver input for optional exact aiming previews.
@@ -534,43 +342,21 @@ pub fn preview_state() -> Option<(
     pwmtf_game_domain::PhysicsProfile,
     pwmtf_game_domain::TableGeometry,
 )> {
-    TRANSPORT.with(|transport| {
-        let transport = transport.borrow();
-        let state = transport.prediction()?.predicted();
-        Some((state.table().clone(), state.physics(), state.geometry()))
-    })
+    with(SessionTransport::preview_state)
 }
 
-/// Returns one predicted canonical ball's position and pocket state.
+/// Returns the interrupted preview sequence until the pointer is released.
 #[must_use]
-pub fn predicted_ball(number: u8) -> Option<(pwmtf_game_domain::Vector, bool)> {
-    TRANSPORT.with(|transport| {
-        transport
-            .borrow()
-            .prediction()?
-            .predicted()
-            .table()
-            .balls()
-            .iter()
-            .find(|ball| ball.id.number() == number)
-            .map(|ball| (ball.position, ball.pocketed))
-    })
+pub fn interrupted_preview_sequence() -> Option<u32> {
+    with(SessionTransport::interrupted_preview_sequence)
 }
 
-/// Returns the current retry delay for JavaScript lifecycle scheduling.
-#[must_use]
-pub fn retry_delay_ms() -> u64 {
-    TRANSPORT.with(|transport| transport.borrow().retry_delay_ms())
+/// Clears the interruption latch after the held pointer is released.
+pub fn rearm_interrupted_gesture() {
+    TRANSPORT.with(|transport| transport.borrow_mut().rearm_interrupted_gesture());
 }
 
-/// Returns whether the failed socket lifecycle should be reconnected.
-#[must_use]
-pub fn needs_reconnect() -> bool {
-    TRANSPORT.with(|transport| transport.borrow().status() == ConnectionStatus::Backoff)
-}
-
-/// Returns whether an authoritative snapshot initialized the live socket.
-#[must_use]
-pub fn is_ready() -> bool {
-    TRANSPORT.with(|transport| transport.borrow().status() == ConnectionStatus::Ready)
+/// Drops a canceled preview when a new gesture or a shot supersedes it.
+pub fn forget_pending_cancel() {
+    TRANSPORT.with(|transport| transport.borrow_mut().forget_pending_cancel());
 }

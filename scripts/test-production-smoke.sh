@@ -244,8 +244,8 @@ for protected_path in challenges invitations invitations/redeem; do
     fi
 done
 
-# WebSocket subscriptions are state-bearing and must reject an unauthenticated
-# Use a valid query and HTTP/1.1 upgrade so extraction reaches authentication.
+# The single session WebSocket is state-bearing and must reject an
+# unauthenticated HTTP/1.1 upgrade at the handshake. `/ws` takes no query.
 "$curl_bin" \
     --http1.1 \
     --silent \
@@ -260,7 +260,7 @@ done
     --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
     --dump-header "$response_headers" \
     --output "$response_body" \
-    "$canonical_origin/ws?match_id=0"
+    "$canonical_origin/ws"
 status=$(awk 'NR == 1 { print $2 }' "$response_headers")
 if [ "$status" != 401 ]; then
     printf '%s\n' "unauthenticated WebSocket upgrade returned $status instead of 401" >&2

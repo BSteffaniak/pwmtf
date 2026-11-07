@@ -61,6 +61,7 @@ async fn run() -> Result<(), StartupError> {
         HttpState::production(db, oidc).with_web_root(configuration.web_root)
     };
     let state = Arc::new(state);
+    state.reset_lobby_presence().await?;
     state.recover_all_matches().await?;
     let (scheduler_shutdown, scheduler_signal) = watch::channel(false);
     let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&state), scheduler_signal));

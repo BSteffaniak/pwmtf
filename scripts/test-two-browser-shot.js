@@ -120,13 +120,38 @@ async function strangerPage() {
   await send('Page.navigate', {url: `${base}/?match=${seed.live_match_id}`}, sessionId);
   return {sessionId, targetId};
 }
+// Session v2 frames are binary with a leading tag: the client sends
+// Preview 0x07 / Command 0x06, the server relays Preview 0x84. A preview
+// message is tag + u128 match id + the fixed 32-byte ShotPreview.
+const PREVIEW_TAGS = {'Network.webSocketFrameSent': 0x07, 'Network.webSocketFrameReceived': 0x84};
+function frameBytes(frame) {
+  frame.bytes ??= Buffer.from(frame.payload, 'base64');
+  return frame.bytes;
+}
 function previews(session, method) {
-  return (frames.get(session) ?? []).filter(frame => frame.method === method && frame.opcode === 2 && frame.payload.startsWith('/wAC'));
+  return (frames.get(session) ?? []).filter(frame => {
+    if (frame.method !== method || frame.opcode !== 2) return false;
+    const bytes = frameBytes(frame);
+    return bytes.length === 49 && bytes[0] === PREVIEW_TAGS[method] && bytes[17] === 0xff;
+  });
+}
+function commandsSent(session) {
+  return (frames.get(session) ?? []).filter(frame => frame.method === 'Network.webSocketFrameSent' &&
+    frame.opcode === 2 && frameBytes(frame)[0] === 0x06);
+}
+function textFrames(session) {
+  return (frames.get(session) ?? []).filter(frame => frame.opcode === 1);
 }
 function preview(frame) {
-  const bytes = Buffer.from(frame.payload, 'base64');
+  const bytes = frameBytes(frame).subarray(17);
   if (bytes.length !== 32) throw new Error('unexpected preview length');
   return {aim: bytes.readUInt16BE(23), power: bytes.readUInt16BE(25), cancel: bytes[27], sequence: bytes.readUInt32BE(19)};
+}
+function u128Hex(value) {
+  return BigInt(value).toString(16).padStart(32, '0');
+}
+function matchDataset(session) {
+  return evaluate(session, 'JSON.stringify(document.querySelector("#match-status")?.dataset ?? {})').then(JSON.parse);
 }
 async function imageHash(session) {
   const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: false}, session);
@@ -140,20 +165,30 @@ async function mouse(session, type, x, y, buttons) {
 async function touch(session, type, points) {
   await send('Input.dispatchTouchEvent', {type, touchPoints: points.map(([id, x, y]) => ({id, x, y}))}, session);
 }
+// A second authenticated socket replays a captured ClientMessage::Preview
+// after a full Hello/Welcome + SubscribeMatch/MatchState handshake.
 async function replayPreview(session, payload) {
+  const subscribe = `02${u128Hex(seed.live_match_id)}`;
   await evaluate(session, `new Promise((resolve, reject) => {
-    const socket = new WebSocket('ws://127.0.0.1:${port}/ws?match_id=${seed.live_match_id}');
+    const socket = new WebSocket('ws://127.0.0.1:${port}/ws');
     socket.binaryType = 'arraybuffer';
+    const hex = value => Uint8Array.from(value.match(/../g), byte => parseInt(byte, 16));
     const timeout = setTimeout(() => { socket.close(); reject(new Error('preview replay handshake timed out')); }, 10000);
-    socket.onopen = () => socket.send('1');
+    socket.onopen = () => socket.send(Uint8Array.of(0x01, 0x01, 0x00, 0x02));
     socket.onerror = () => { clearTimeout(timeout); reject(new Error('preview replay socket failed')); };
-    let negotiated = false;
+    let stage = 'hello';
     socket.onmessage = event => {
-      if (typeof event.data === 'string') { negotiated = event.data === '1'; return; }
-      if (!negotiated) return;
-      clearTimeout(timeout);
-      socket.send(Uint8Array.from(atob('${payload}'), char => char.charCodeAt(0)));
-      setTimeout(() => { socket.close(); resolve(true); }, 250);
+      if (typeof event.data === 'string') { clearTimeout(timeout); reject(new Error('server sent a text frame')); return; }
+      const tag = new Uint8Array(event.data)[0];
+      if (stage === 'hello' && tag === 0x81) {
+        stage = 'subscribe';
+        socket.send(hex('${subscribe}'));
+      } else if (stage === 'subscribe' && tag === 0x82) {
+        stage = 'replayed';
+        clearTimeout(timeout);
+        socket.send(Uint8Array.from(atob('${payload}'), char => char.charCodeAt(0)));
+        setTimeout(() => { socket.close(); resolve(true); }, 250);
+      }
     };
   })`);
 }
@@ -377,6 +412,9 @@ try {
   await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
   await until('match shooter regains focus', () => evaluate(focusShooter, 'document.hasFocus()'));
   await mouse(focusShooter, 'mouseReleased', focusOrigin.x, focusOrigin.y, 0);
+  // Session v2 closes the socket while the tab is hidden; a contact that
+  // starts before the session is ready again is deliberately ignored.
+  await until('match shooter session reconnects', () => evaluate(focusShooter, 'document.querySelector("#match-status")?.textContent.startsWith("Connected") && document.querySelector("#match-status")?.textContent.includes("your turn")'));
   await sleep(200);
   const resumedBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
   await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
@@ -387,7 +425,7 @@ try {
   await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 1);
   await until('resumed match drag cancels at origin', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(resumedBefore).some(frame => preview(frame).cancel === 1));
   await mouse(focusShooter, 'mouseReleased', focusOrigin.x, focusOrigin.y, 0);
-  if ((frames.get(focusShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
+  if (commandsSent(focusShooter).length) {
     throw new Error('match tab interruption submitted a shot');
   }
   // Same seeded match, separate control mode: aim-only must reach the opponent
@@ -426,7 +464,7 @@ try {
   await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y, 1);
   await until('opponent sees separate bar return cancel', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).some(value => value.cancel === 1));
   await mouse(focusShooter, 'mouseReleased', separateBar.x, separateBar.y, 0);
-  if ((frames.get(focusShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
+  if (commandsSent(focusShooter).length) {
     throw new Error('uncharged separate mode sent a shot');
   }
   // Charge once more: releasing the bar, not the aim drag, submits one shot.
@@ -438,12 +476,14 @@ try {
   await mouse(focusShooter, 'mouseReleased', separateBar.x, separateBar.y + 110 * focusScale, 0);
   await until('separate power release reconciles authoritative shot', () => evaluate(focusOpponent,
     'document.querySelector("#match-status")?.textContent.includes("revision 1")'), 30000);
-  const separateCommands = (frames.get(focusShooter) ?? []).filter(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'));
+  const separateCommands = commandsSent(focusShooter);
   if (separateCommands.length !== 1) throw new Error(`separate bar release sent ${separateCommands.length} canonical shots`);
   one = await page(seed.player_one_cookie);
   two = await page(seed.player_two_cookie);
   stranger = await strangerPage();
   const outsider = stranger.sessionId;
+  await until('signed-out outsider is asked to sign in instead of subscribing', () => evaluate(outsider,
+    'document.querySelector("#match-status")?.textContent.includes("Sign in")'), 60000);
   await sleep(400);
   if (previews(outsider, 'Network.webSocketFrameReceived').length) {
     throw new Error('outsider received a preview before match subscription');
@@ -477,11 +517,16 @@ try {
   await until('authoritative deadline advances both clients', async () =>
     (await evaluate(deadlineShooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')) &&
     (await evaluate(deadlineOpponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')), 145000);
-  const deadlineAccessResult = await evaluate(deadlineShooter, `fetch('/api/matches/${seed.deadline_match_id}').then(async r => ({status: r.status, body: await r.text()}))`);
-  if (deadlineAccessResult.status !== 200) throw new Error(`deadline access HTTP ${deadlineAccessResult.status}: ${deadlineAccessResult.body.slice(0, 180)}`);
-  const deadlineAccess = JSON.parse(deadlineAccessResult.body);
-  if (deadlineAccess.revision !== 1 || deadlineAccess.active_player !== 2 || deadlineAccess.deadline_at_ms === null) {
-    throw new Error(`authoritative deadline did not transfer the turn: ${JSON.stringify(deadlineAccess)}`);
+  // The turn and its new deadline arrive only through the session MatchState.
+  for (const [label, session, seat] of [['shooter', deadlineShooter, '1'], ['opponent', deadlineOpponent, '2']]) {
+    const deadlineAccess = await matchDataset(session);
+    if (deadlineAccess.revision !== '1' || deadlineAccess.activePlayer !== '2' || deadlineAccess.seat !== seat ||
+        !/^\d+$/.test(deadlineAccess.deadlineAtMs ?? '')) {
+      throw new Error(`authoritative deadline did not transfer the turn for the ${label}: ${JSON.stringify(deadlineAccess)}`);
+    }
+  }
+  if (!(await evaluate(deadlineOpponent, 'document.querySelector("#match-status")?.textContent.includes("your turn")'))) {
+    throw new Error('opponent was not shown the transferred turn');
   }
   await send('Target.activateTarget', {targetId: deadlineOpponentPage.targetId});
   await until('deadline clears opponent planning cue', async () => (await imageHash(deadlineOpponent)) !== beforeDeadlineImage);
@@ -491,11 +536,11 @@ try {
   await mouse(deadlineShooter, 'mouseReleased', deadlineOrigin.x - 130, deadlineOrigin.y + 35, 0);
   await sleep(400);
   if (previews(deadlineOpponent, 'Network.webSocketFrameReceived').length !== beforeLatePreview ||
-      (frames.get(deadlineShooter) ?? []).some(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE'))) {
+      commandsSent(deadlineShooter).length) {
     throw new Error('expired drag sent a preview or shot after authoritative deadline');
   }
-  const afterDeadlineAccess = await evaluate(deadlineShooter, `fetch('/api/matches/${seed.deadline_match_id}').then(r => r.json())`);
-  if (afterDeadlineAccess.revision !== 1 || afterDeadlineAccess.active_player !== 2) {
+  const afterDeadlineAccess = await matchDataset(deadlineOpponent);
+  if (afterDeadlineAccess.revision !== '1' || afterDeadlineAccess.activePlayer !== '2') {
     throw new Error('late release changed canonical state after deadline');
   }
   await send('Target.activateTarget', {targetId: one.targetId});
@@ -677,8 +722,48 @@ try {
     return value.sequence > shortened.sequence && value.cancel === 0;
   });
   if (!resumed || preview(resumed).power < 1000) throw new Error('resumed drag did not charge');
+  // Sample the observer's rendered balls through the shot. Accepted shots are
+  // replayed tick-by-tick from the authoritative table, so mid-shot positions
+  // must differ from both the starting rack and the settled table.
+  await evaluate(opponent, `(async () => {
+    const module = await import('/pwmtf_client.js');
+    if (typeof module.match_ball_position !== 'function') throw new Error('match_ball_position debug export is missing');
+    const status = document.querySelector('#match-status');
+    window.__pwmtfSamples = [];
+    window.__pwmtfSampler = setInterval(() => {
+      const balls = [];
+      for (let ball = 0; ball < 16; ball += 1) {
+        const position = module.match_ball_position(ball);
+        balls.push(position === undefined || position === null ? null : Array.from(position));
+      }
+      window.__pwmtfSamples.push({revision: status.dataset.revision, playing: status.dataset.playing === 'true', balls});
+      if (window.__pwmtfSamples.length >= 3000) clearInterval(window.__pwmtfSampler);
+    }, 20);
+    return true;
+  })()`);
   await mouse(shooter, 'mouseReleased', origin.x - 120, origin.y + 20, 0);
+  await send('Target.activateTarget', {targetId: two.targetId});
   await until('authoritative revision 1', () => evaluate(opponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")'), 30000);
+  await until('observer shot playback settles', async () => {
+    const data = await matchDataset(opponent);
+    return data.revision === '1' && data.playing === 'false';
+  }, 30000);
+  await sleep(200);
+  const samples = JSON.parse(await evaluate(opponent, 'clearInterval(window.__pwmtfSampler), JSON.stringify(window.__pwmtfSamples)'));
+  const before = samples.filter(sample => sample.revision === '0').at(-1);
+  const playing = samples.filter(sample => sample.revision === '1' && sample.playing);
+  const settled = samples.at(-1);
+  if (!before || !settled || settled.playing || playing.length < 3) {
+    throw new Error(`observer did not play the accepted shot back (${playing.length} playing samples of ${samples.length})`);
+  }
+  const moved = (left, right) => left !== null && right !== null && Math.hypot(left[0] - right[0], left[1] - right[1]) > 1e-3;
+  const midShot = playing.filter(sample => sample.balls.some((position, ball) =>
+    moved(position, before.balls[ball]) && moved(position, settled.balls[ball])));
+  const distinctFrames = new Set(midShot.map(sample => JSON.stringify(sample.balls))).size;
+  if (midShot.length === 0 || distinctFrames < 3) {
+    throw new Error(`observer did not render ball movement between release and settle (${midShot.length} mid-shot samples, ${distinctFrames} distinct)`);
+  }
+  await send('Target.activateTarget', {targetId: one.targetId});
   await until('shooter reconciled', () => evaluate(shooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")'), 30000);
   const receivedAfterShot = previews(opponent, 'Network.webSocketFrameReceived').length;
   // A late preview from the former turn must not cross the authoritative revision.
@@ -694,10 +779,13 @@ try {
   if (!(await evaluate(opponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")'))) {
     throw new Error('opponent lost canonical state after preview expiration');
   }
-  if ((frames.get(shooter) ?? []).filter(frame => frame.method === 'Network.webSocketFrameSent' && frame.opcode === 2 && frame.payload.startsWith('AAE')).length !== 1) {
+  if (commandsSent(shooter).length !== 1) {
     throw new Error('release did not submit exactly one canonical command');
   }
-  console.log('practice combined and separate controls (mouse aim/bar, touch cancellation), combined mouse/touch/multitouch and real tab-switch cancel, drag/dead-zone/local shot; two-browser separate aim/power preview and one authoritative bar-release shot, combined live aim/power, match tab-switch interruption, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect and outsider isolation passed');
+  for (const session of [shooter, opponent, focusShooter, focusOpponent, deadlineShooter, deadlineOpponent]) {
+    if (textFrames(session).length) throw new Error('a session WebSocket carried a text frame');
+  }
+  console.log('practice combined and separate controls (mouse aim/bar, touch cancellation), combined mouse/touch/multitouch and real tab-switch cancel, drag/dead-zone/local shot; two-browser separate aim/power preview and one authoritative bar-release shot, combined live aim/power, match tab-switch interruption, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
 } catch (error) {
   console.error(`two-browser shot failed: ${error.stack ?? error}`);
   process.exitCode = 1;

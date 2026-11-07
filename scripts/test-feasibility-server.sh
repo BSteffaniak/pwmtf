@@ -206,6 +206,16 @@ curl \
     --insecure \
     --fail \
     --silent \
+    --dump-header "$tmp/feasibility-headers" \
+    --output "$tmp/served-feasibility.js" \
+    "https://127.0.0.1:$port/feasibility.js"
+cmp "$root/dist/feasibility.js" "$tmp/served-feasibility.js"
+grep -qi '^Content-Type: text/javascript; charset=utf-8' "$tmp/feasibility-headers"
+
+curl \
+    --insecure \
+    --fail \
+    --silent \
     --head \
     "https://127.0.0.1:$port/pwmtf_client_bg.wasm" >"$tmp/wasm-headers"
 grep -qi '^Content-Type: application/wasm' "$tmp/wasm-headers"

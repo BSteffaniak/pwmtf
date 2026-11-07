@@ -38,6 +38,7 @@ pub struct PredictionState {
     authoritative: MatchState,
     predicted: MatchState,
     pending: Option<CommandId>,
+    pending_playback_ticks: u32,
     interpolation: Vec<BallSample>,
 }
 
@@ -55,6 +56,7 @@ impl PredictionState {
             predicted: authoritative.clone(),
             authoritative,
             pending: None,
+            pending_playback_ticks: 0,
             interpolation: Vec::new(),
         })
     }
@@ -83,6 +85,23 @@ impl PredictionState {
         self.pending.is_some()
     }
 
+    /// Returns the unresolved predicted command's identifier, if any.
+    #[must_use]
+    pub const fn pending_command(&self) -> Option<CommandId> {
+        self.pending
+    }
+
+    /// Returns the fixed shot-playback ticks of the pending prediction, or
+    /// zero without one or for a non-shot command.
+    #[must_use]
+    pub const fn pending_playback_ticks(&self) -> u32 {
+        if self.pending.is_some() {
+            self.pending_playback_ticks
+        } else {
+            0
+        }
+    }
+
     /// Returns interpolation samples created by the last correction.
     #[must_use]
     pub fn interpolation(&self) -> &[BallSample] {
@@ -108,7 +127,7 @@ impl PredictionState {
         if self.pending.is_some() {
             return Err(PredictionError::PendingCommand);
         }
-        self.predicted.apply_command(command)?;
+        self.pending_playback_ticks = self.predicted.apply_command_timed(command)?.playback_ticks;
         self.pending = Some(command_id);
         Ok(CommandEnvelope::new(
             self.authoritative_revision,

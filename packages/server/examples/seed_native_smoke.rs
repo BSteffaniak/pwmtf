@@ -3,10 +3,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use pwmtf_game_domain::{
-    MatchCommand, MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
-    VersionedMatchCommand,
+    Aim, MatchCommand, MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, ShotPower, Spin,
+    TableGeometry, VersionedMatchCommand, VersionedShotCommand,
 };
-use pwmtf_protocol::{CommandEnvelope, CommandId};
+use pwmtf_protocol::{ClientMessage, CommandEnvelope, CommandId, SESSION_VERSION};
 use pwmtf_server::{
     AccountId, DeadlineMillis, MatchId, MatchService, Participants, Session, SessionCookiePolicy,
     SwitchyCommandJournal, create_stored_session, migrate,
@@ -163,10 +163,19 @@ async fn run() -> Result<(), SeedError> {
         .where_eq("match_id", focus_match_id.value().to_string())
         .execute(&*db)
         .await?;
+    // Live clients cannot submit `Timeout` (it is server-only), so the live
+    // command is a full-power break shot by the breaking seat.
     let live_command = CommandEnvelope::new(
         0,
         CommandId::new([0x53; 16]),
-        VersionedMatchCommand::new(MatchCommand::Timeout),
+        VersionedMatchCommand::new(MatchCommand::PlayShot {
+            shot: VersionedShotCommand::new(
+                Aim::new(0).map_err(|_| SeedError::Integrity)?,
+                ShotPower::new(ShotPower::MAX).map_err(|_| SeedError::Integrity)?,
+                Spin::CENTER,
+            ),
+            called_pocket: None,
+        }),
     );
     let live_terminal_command = CommandEnvelope::new(
         1,
@@ -205,6 +214,40 @@ async fn run() -> Result<(), SeedError> {
     println!(
         "live_terminal_command={}",
         encode_bytes(&live_terminal_command.to_bytes())
+    );
+    // Ready-to-send version-two session frames for `/ws` smoke clients.
+    println!(
+        "hello_frame={}",
+        encode_bytes(&session_frame(&ClientMessage::Hello {
+            versions: vec![SESSION_VERSION],
+        })?)
+    );
+    for (name, id) in [
+        ("match", match_id),
+        ("deadline_match", deadline_match_id),
+        ("focus_match", focus_match_id),
+        ("live_match", live_match_id),
+    ] {
+        println!(
+            "{name}_subscribe_frame={}",
+            encode_bytes(&session_frame(&ClientMessage::SubscribeMatch {
+                match_id: id.value(),
+            })?)
+        );
+    }
+    println!(
+        "live_command_frame={}",
+        encode_bytes(&session_frame(&ClientMessage::Command {
+            match_id: live_match_id.value(),
+            envelope: live_command,
+        })?)
+    );
+    println!(
+        "live_terminal_command_frame={}",
+        encode_bytes(&session_frame(&ClientMessage::Command {
+            match_id: live_match_id.value(),
+            envelope: live_terminal_command,
+        })?)
     );
     println!(
         "player_one_cookie={}",
@@ -247,6 +290,10 @@ async fn insert_initial_match(
         .execute(db)
         .await?;
     Ok(())
+}
+
+fn session_frame(message: &ClientMessage) -> Result<Vec<u8>, SeedError> {
+    message.to_bytes().map_err(|_| SeedError::Integrity)
 }
 
 fn encode_bytes(bytes: &[u8]) -> String {

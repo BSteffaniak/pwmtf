@@ -1,5 +1,7 @@
 //! Switchy persistence for waiting-lobby lifecycle transitions.
 
+use std::collections::BTreeSet;
+
 use crate::{
     AccountId, ConnectionId, LobbyId, LobbyRecord, LobbyStatus, MatchId, Participants,
     ScheduledDeadline,
@@ -8,175 +10,139 @@ use pwmtf_game_domain::MatchState;
 use switchy_database::{Database, DatabaseValue, query::FilterableQuery as _};
 use thiserror::Error;
 
-const LOBBY_CONNECTION_LEASE_MS: u64 = 15_000;
-
-/// Registers a participant's authorized live lobby connection and transactionally
-/// removes expired leases for that lobby.
+/// Records explicit readiness for each of the actor's live lobby presences.
+///
+/// Presence itself is in-memory; each live `SubscribeLobby` has a fresh
+/// presence identity, and readiness rows keyed by an identity that is no
+/// longer live (closed socket, process restart) never count toward a start.
+/// A participant therefore loses readiness once their last ready presence
+/// disappears and must ready again explicitly.
 ///
 /// # Errors
 ///
 /// Returns [`LobbyStoreError`] for missing/consumed lobbies, unauthorized
-/// participants, duplicate connections, malformed records, or database failures.
-pub async fn connect_lobby(
-    db: &dyn Database,
-    lobby_id: LobbyId,
-    actor: AccountId,
-    connection: ConnectionId,
-    now: u64,
-) -> Result<LobbyRecord, LobbyStoreError> {
-    let tx = db.begin_transaction().await?;
-    let record = load_required_lobby(&*tx, lobby_id).await?;
-    require_waiting_member(record, actor)?;
-    let cutoff = to_i64(now.saturating_sub(LOBBY_CONNECTION_LEASE_MS))?;
-    tx.delete("lobby_readiness")
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_lt("last_seen_at_ms", cutoff)
-        .execute(&*tx)
-        .await?;
-    tx.insert("lobby_readiness")
-        .value("lobby_id", lobby_id.value().to_string())
-        .value("account_id", actor.value().to_string())
-        .value("connection_id", connection.value().to_string())
-        .value("ready", 0_i64)
-        .value("last_seen_at_ms", to_i64(now)?)
-        .execute(&*tx)
-        .await?;
-    tx.commit().await?;
-    Ok(record)
-}
-
-/// Removes one exact live lobby connection and clears the participant's ready
-/// state only after their last connection disappears.
-///
-/// # Errors
-///
-/// Returns [`LobbyStoreError`] for missing/consumed lobbies, unauthorized or
-/// mismatched connections, malformed records, or database failures.
-pub async fn disconnect_lobby(
-    db: &dyn Database,
-    lobby_id: LobbyId,
-    actor: AccountId,
-    connection: ConnectionId,
-) -> Result<LobbyRecord, LobbyStoreError> {
-    let tx = db.begin_transaction().await?;
-    let record = load_required_lobby(&*tx, lobby_id).await?;
-    require_waiting_member(record, actor)?;
-    let rows = tx
-        .select("lobby_readiness")
-        .where_eq("connection_id", connection.value().to_string())
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("account_id", actor.value().to_string())
-        .execute(&*tx)
-        .await?;
-    if rows.len() != 1 {
-        return Err(LobbyStoreError::ConnectionNotFound);
-    }
-    tx.delete("lobby_readiness")
-        .where_eq("connection_id", connection.value().to_string())
-        .execute(&*tx)
-        .await?;
-    tx.commit().await?;
-    Ok(record)
-}
-
-/// Refreshes one exact live lobby connection lease. A heartbeat received after
-/// expiry reconnects the lease but clears stale readiness, requiring a new
-/// explicit ready action.
-///
-/// # Errors
-///
-/// Returns [`LobbyStoreError`] for missing/consumed lobbies, unauthorized or
-/// mismatched connections, overflow, malformed records, or database failures.
-pub async fn heartbeat_lobby(
-    db: &dyn Database,
-    lobby_id: LobbyId,
-    actor: AccountId,
-    connection: ConnectionId,
-    now: u64,
-) -> Result<LobbyRecord, LobbyStoreError> {
-    let tx = db.begin_transaction().await?;
-    let record = load_required_lobby(&*tx, lobby_id).await?;
-    require_waiting_member(record, actor)?;
-    let rows = tx
-        .select("lobby_readiness")
-        .where_eq("connection_id", connection.value().to_string())
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("account_id", actor.value().to_string())
-        .execute(&*tx)
-        .await?;
-    let [row] = rows.as_slice() else {
-        return Err(LobbyStoreError::ConnectionNotFound);
-    };
-    let cutoff = to_i64(now.saturating_sub(LOBBY_CONNECTION_LEASE_MS))?;
-    let expired = integer(row, "last_seen_at_ms")? < cutoff;
-    let mut update = tx
-        .update("lobby_readiness")
-        .value("last_seen_at_ms", to_i64(now)?);
-    if expired {
-        update = update.value("ready", 0_i64);
-    }
-    let updated = update
-        .where_eq("connection_id", connection.value().to_string())
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("account_id", actor.value().to_string())
-        .execute(&*tx)
-        .await?;
-    if updated.len() != 1 {
-        return Err(LobbyStoreError::ConnectionNotFound);
-    }
-    tx.commit().await?;
-    Ok(record)
-}
-
-/// Marks every live connection for a participant ready and removes that
-/// participant's expired leases in the same transaction.
-///
-/// # Errors
-///
-/// Returns [`LobbyStoreError`] unless the actor has a live connection in the
-/// waiting lobby at `now`, or persistence fails.
+/// participants, an actor without any live presence
+/// ([`LobbyStoreError::NotConnected`]), presence identities owned by another
+/// lobby or account, overflow, malformed records, or database failures.
 pub async fn ready_lobby(
     db: &dyn Database,
     lobby_id: LobbyId,
     actor: AccountId,
+    presences: &[ConnectionId],
     now: u64,
 ) -> Result<LobbyRecord, LobbyStoreError> {
     let tx = db.begin_transaction().await?;
     let record = load_required_lobby(&*tx, lobby_id).await?;
     require_waiting_member(record, actor)?;
-    let cutoff = to_i64(now.saturating_sub(LOBBY_CONNECTION_LEASE_MS))?;
-    let rows = tx
-        .select("lobby_readiness")
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("account_id", actor.value().to_string())
-        .where_gte("last_seen_at_ms", cutoff)
-        .execute(&*tx)
-        .await?;
-    if rows.is_empty() {
+    if presences.is_empty() {
         return Err(LobbyStoreError::NotConnected);
     }
-    let updated = tx
-        .update("lobby_readiness")
-        .value("ready", 1_i64)
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("account_id", actor.value().to_string())
-        .where_gte("last_seen_at_ms", cutoff)
-        .execute(&*tx)
-        .await?;
-    if updated.len() != rows.len() {
-        return Err(LobbyStoreError::Malformed);
+    for presence in presences {
+        let rows = tx
+            .select("lobby_readiness")
+            .where_eq("connection_id", presence.value().to_string())
+            .execute(&*tx)
+            .await?;
+        match rows.as_slice() {
+            [] => {
+                tx.insert("lobby_readiness")
+                    .value("lobby_id", lobby_id.value().to_string())
+                    .value("account_id", actor.value().to_string())
+                    .value("connection_id", presence.value().to_string())
+                    .value("ready", 1_i64)
+                    .value("last_seen_at_ms", to_i64(now)?)
+                    .execute(&*tx)
+                    .await?;
+            }
+            [row] => {
+                if parse_u128(row, "lobby_id")? != lobby_id.value()
+                    || parse_u128(row, "account_id")? != actor.value()
+                {
+                    return Err(LobbyStoreError::Malformed);
+                }
+                tx.update("lobby_readiness")
+                    .value("ready", 1_i64)
+                    .value("last_seen_at_ms", to_i64(now)?)
+                    .where_eq("connection_id", presence.value().to_string())
+                    .execute(&*tx)
+                    .await?;
+            }
+            _ => return Err(LobbyStoreError::Malformed),
+        }
     }
-    tx.delete("lobby_readiness")
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("account_id", actor.value().to_string())
-        .where_lt("last_seen_at_ms", cutoff)
-        .execute(&*tx)
-        .await?;
     tx.commit().await?;
     Ok(record)
 }
 
-/// Returns whether both participants have at least one live ready connection.
+/// Removes the readiness row of one presence identity, if any.
+///
+/// # Errors
+///
+/// Returns [`LobbyStoreError::Database`] when the delete fails.
+pub async fn release_lobby_presence(
+    db: &dyn Database,
+    presence: ConnectionId,
+) -> Result<(), LobbyStoreError> {
+    db.delete("lobby_readiness")
+        .where_eq("connection_id", presence.value().to_string())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Removes every readiness row of one lobby after it stops waiting.
+///
+/// # Errors
+///
+/// Returns [`LobbyStoreError::Database`] when the delete fails.
+pub async fn clear_lobby_readiness(
+    db: &dyn Database,
+    lobby_id: LobbyId,
+) -> Result<(), LobbyStoreError> {
+    db.delete("lobby_readiness")
+        .where_eq("lobby_id", lobby_id.value().to_string())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Removes every readiness row. Called at process start, when no presence
+/// identity can be live; this never touches lobby, account, or match data.
+///
+/// # Errors
+///
+/// Returns [`LobbyStoreError::Database`] when the delete fails.
+pub async fn clear_lobby_presence(db: &dyn Database) -> Result<(), LobbyStoreError> {
+    db.delete("lobby_readiness").execute(db).await?;
+    Ok(())
+}
+
+/// Returns which seats `(player_one, player_two)` have a ready row whose
+/// presence identity is in `live`.
+///
+/// # Errors
+///
+/// Returns [`LobbyStoreError`] for missing, consumed, malformed (including
+/// rows naming a non-participant), or database records.
+pub async fn lobby_readiness(
+    db: &dyn Database,
+    lobby_id: LobbyId,
+    live: &BTreeSet<ConnectionId>,
+) -> Result<(bool, bool), LobbyStoreError> {
+    let record = load_required_lobby(db, lobby_id).await?;
+    if record.status != LobbyStatus::Waiting {
+        return Err(LobbyStoreError::NotWaiting);
+    }
+    let rows = db
+        .select("lobby_readiness")
+        .where_eq("lobby_id", lobby_id.value().to_string())
+        .where_eq("ready", 1_i64)
+        .execute(db)
+        .await?;
+    ready_seats(record, &rows, live)
+}
+
+/// Returns whether both participants have at least one live, ready presence.
 ///
 /// # Errors
 ///
@@ -184,31 +150,31 @@ pub async fn ready_lobby(
 pub async fn lobby_ready(
     db: &dyn Database,
     lobby_id: LobbyId,
-    now: u64,
+    live: &BTreeSet<ConnectionId>,
 ) -> Result<bool, LobbyStoreError> {
-    let record = load_required_lobby(db, lobby_id).await?;
-    if record.status != LobbyStatus::Waiting {
-        return Err(LobbyStoreError::NotWaiting);
-    }
-    let cutoff = to_i64(now.saturating_sub(LOBBY_CONNECTION_LEASE_MS))?;
-    let rows = db
-        .select("lobby_readiness")
-        .where_eq("lobby_id", lobby_id.value().to_string())
-        .where_eq("ready", 1_i64)
-        .where_gte("last_seen_at_ms", cutoff)
-        .execute(db)
-        .await?;
+    let (player_one, player_two) = lobby_readiness(db, lobby_id, live).await?;
+    Ok(player_one && player_two)
+}
+
+fn ready_seats(
+    record: LobbyRecord,
+    rows: &[switchy_database::Row],
+    live: &BTreeSet<ConnectionId>,
+) -> Result<(bool, bool), LobbyStoreError> {
     let mut player_one = false;
     let mut player_two = false;
     for row in rows {
-        let account = AccountId::new(parse_u128(&row, "account_id")?);
+        let account = AccountId::new(parse_u128(row, "account_id")?);
         if account != record.participants.player_one && account != record.participants.player_two {
             return Err(LobbyStoreError::Malformed);
+        }
+        if !live.contains(&ConnectionId::new(parse_u128(row, "connection_id")?)) {
+            continue;
         }
         player_one |= account == record.participants.player_one;
         player_two |= account == record.participants.player_two;
     }
-    Ok(player_one && player_two)
+    Ok((player_one, player_two))
 }
 
 fn require_waiting_member(record: LobbyRecord, actor: AccountId) -> Result<(), LobbyStoreError> {
@@ -221,43 +187,32 @@ fn require_waiting_member(record: LobbyRecord, actor: AccountId) -> Result<(), L
     Ok(())
 }
 
-/// Atomically starts one waiting lobby only while both participants have live,
-/// ready connections.
+/// Atomically starts one waiting lobby only while both participants have a
+/// live (`live` presence identities), ready presence.
 ///
 /// # Errors
 ///
-/// Returns [`LobbyStoreError`] for missing/consumed/unready lobbies, expired
-/// connection leases, mismatched deadline identity, duplicate match identifiers,
-/// malformed records, numeric overflow, or database failures.
+/// Returns [`LobbyStoreError`] for missing/consumed/unready lobbies, mismatched
+/// deadline identity, duplicate match identifiers, malformed records, numeric
+/// overflow, or database failures.
 pub async fn start_ready_lobby(
     db: &dyn Database,
     lobby_id: LobbyId,
     match_id: MatchId,
     state: &MatchState,
     deadline: ScheduledDeadline,
-    now: u64,
+    live: &BTreeSet<ConnectionId>,
 ) -> Result<LobbyRecord, LobbyStoreError> {
     let tx = db.begin_transaction().await?;
     let record = load_required_lobby(&*tx, lobby_id).await?;
     require_waiting_member(record, record.participants.player_one)?;
-    let cutoff = to_i64(now.saturating_sub(LOBBY_CONNECTION_LEASE_MS))?;
     let rows = tx
         .select("lobby_readiness")
         .where_eq("lobby_id", lobby_id.value().to_string())
         .where_eq("ready", 1_i64)
-        .where_gte("last_seen_at_ms", cutoff)
         .execute(&*tx)
         .await?;
-    let mut player_one = false;
-    let mut player_two = false;
-    for row in rows {
-        let account = AccountId::new(parse_u128(&row, "account_id")?);
-        if account != record.participants.player_one && account != record.participants.player_two {
-            return Err(LobbyStoreError::Malformed);
-        }
-        player_one |= account == record.participants.player_one;
-        player_two |= account == record.participants.player_two;
-    }
+    let (player_one, player_two) = ready_seats(record, &rows, live)?;
     if !player_one || !player_two {
         return Err(LobbyStoreError::NotReady);
     }
@@ -510,12 +465,9 @@ pub enum LobbyStoreError {
     /// Actor is not a lobby participant.
     #[error("lobby operation is not authorized")]
     Unauthorized,
-    /// Participant has no live lobby connection.
+    /// Participant has no live lobby presence.
     #[error("lobby participant is not connected")]
     NotConnected,
-    /// Exact connection does not belong to this lobby participant.
-    #[error("lobby connection not found")]
-    ConnectionNotFound,
     /// Both participants do not have ready live connections.
     #[error("lobby is not ready")]
     NotReady,
@@ -581,12 +533,6 @@ fn parse_text_u128(value: &str) -> Result<u128, LobbyStoreError> {
 fn text(row: &switchy_database::Row, column: &str) -> Result<String, LobbyStoreError> {
     row.get(column)
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .ok_or(LobbyStoreError::Malformed)
-}
-
-fn integer(row: &switchy_database::Row, column: &str) -> Result<i64, LobbyStoreError> {
-    row.get(column)
-        .and_then(|value| value.as_i64())
         .ok_or(LobbyStoreError::Malformed)
 }
 
@@ -657,80 +603,92 @@ mod tests {
         .unwrap()
     }
 
+    fn deadline(state: &MatchState) -> ScheduledDeadline {
+        ScheduledDeadline {
+            id: crate::DeadlineId {
+                revision: 0,
+                player: state.active_player(),
+            },
+            due_at: crate::DeadlineMillis::new(30_000),
+        }
+    }
+
+    fn live(ids: &[u128]) -> BTreeSet<ConnectionId> {
+        ids.iter().copied().map(ConnectionId::new).collect()
+    }
+
     #[test]
-    fn readiness_requires_live_connections_for_both_participants() {
+    fn readiness_requires_live_ready_presence_for_both_participants() {
         block_on(async {
             let db = database().await;
             let lobby_id = LobbyId::new(3);
             insert_lobby(&*db, lobby_id).await;
             assert!(matches!(
-                ready_lobby(&*db, lobby_id, AccountId::new(1), 0).await,
+                ready_lobby(&*db, lobby_id, AccountId::new(1), &[], 0).await,
                 Err(LobbyStoreError::NotConnected)
             ));
-            connect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(10), 0)
-                .await
-                .unwrap();
-            connect_lobby(&*db, lobby_id, AccountId::new(2), ConnectionId::new(20), 0)
-                .await
-                .unwrap();
-            ready_lobby(&*db, lobby_id, AccountId::new(1), 0)
-                .await
-                .unwrap();
-            heartbeat_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(10), 5)
-                .await
-                .unwrap();
-            assert!(!lobby_ready(&*db, lobby_id, 0).await.unwrap());
-            ready_lobby(&*db, lobby_id, AccountId::new(2), 0)
-                .await
-                .unwrap();
-            assert!(lobby_ready(&*db, lobby_id, 0).await.unwrap());
-            assert!(!lobby_ready(&*db, lobby_id, 15_001).await.unwrap());
             assert!(matches!(
-                ready_lobby(&*db, lobby_id, AccountId::new(2), 15_001).await,
-                Err(LobbyStoreError::NotConnected)
+                ready_lobby(
+                    &*db,
+                    lobby_id,
+                    AccountId::new(3),
+                    &[ConnectionId::new(9)],
+                    0
+                )
+                .await,
+                Err(LobbyStoreError::Unauthorized)
             ));
-            let state = state();
-            let deadline = ScheduledDeadline {
-                id: crate::DeadlineId {
-                    revision: 0,
-                    player: state.active_player(),
-                },
-                due_at: crate::DeadlineMillis::new(30_000),
-            };
-            assert!(matches!(
-                start_ready_lobby(&*db, lobby_id, MatchId::new(29), &state, deadline, 15_001,)
-                    .await,
-                Err(LobbyStoreError::NotReady)
-            ));
-            assert!(db.select("matches").execute(&*db).await.unwrap().is_empty());
-            heartbeat_lobby(
+            ready_lobby(
                 &*db,
                 lobby_id,
                 AccountId::new(1),
-                ConnectionId::new(10),
-                15_001,
+                &[ConnectionId::new(10)],
+                0,
             )
             .await
             .unwrap();
-            assert!(!lobby_ready(&*db, lobby_id, 15_001).await.unwrap());
-            heartbeat_lobby(
+            assert_eq!(
+                lobby_readiness(&*db, lobby_id, &live(&[10, 20]))
+                    .await
+                    .unwrap(),
+                (true, false)
+            );
+            ready_lobby(
                 &*db,
                 lobby_id,
                 AccountId::new(2),
-                ConnectionId::new(20),
-                15_001,
+                &[ConnectionId::new(20)],
+                0,
             )
             .await
             .unwrap();
-            assert!(!lobby_ready(&*db, lobby_id, 15_001).await.unwrap());
-            ready_lobby(&*db, lobby_id, AccountId::new(2), 15_001)
-                .await
-                .unwrap();
-            assert!(lobby_ready(&*db, lobby_id, 15_001).await.unwrap());
-            let started =
-                start_ready_lobby(&*db, lobby_id, MatchId::new(30), &state, deadline, 15_001)
-                    .await
-                    .unwrap();
+            assert!(lobby_ready(&*db, lobby_id, &live(&[10, 20])).await.unwrap());
+            // A presence that is no longer live no longer counts.
+            assert!(!lobby_ready(&*db, lobby_id, &live(&[20])).await.unwrap());
+            let state = state();
+            assert!(matches!(
+                start_ready_lobby(
+                    &*db,
+                    lobby_id,
+                    MatchId::new(29),
+                    &state,
+                    deadline(&state),
+                    &live(&[20, 21]),
+                )
+                .await,
+                Err(LobbyStoreError::NotReady)
+            ));
+            assert!(db.select("matches").execute(&*db).await.unwrap().is_empty());
+            let started = start_ready_lobby(
+                &*db,
+                lobby_id,
+                MatchId::new(30),
+                &state,
+                deadline(&state),
+                &live(&[10, 20]),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 started.status,
                 LobbyStatus::Started {
@@ -739,60 +697,140 @@ mod tests {
             );
             assert_eq!(db.select("matches").execute(&*db).await.unwrap().len(), 1);
             assert!(matches!(
-                start_ready_lobby(&*db, lobby_id, MatchId::new(31), &state, deadline, 15_001,)
-                    .await,
+                start_ready_lobby(
+                    &*db,
+                    lobby_id,
+                    MatchId::new(31),
+                    &state,
+                    deadline(&state),
+                    &live(&[10, 20]),
+                )
+                .await,
                 Err(LobbyStoreError::NotWaiting)
             ));
             assert!(matches!(
-                connect_lobby(&*db, lobby_id, AccountId::new(3), ConnectionId::new(30), 0).await,
+                ready_lobby(
+                    &*db,
+                    lobby_id,
+                    AccountId::new(1),
+                    &[ConnectionId::new(11)],
+                    0
+                )
+                .await,
                 Err(LobbyStoreError::NotWaiting)
             ));
         });
     }
 
     #[test]
-    fn last_disconnect_clears_readiness_and_exact_connection_is_required() {
+    #[allow(clippy::too_many_lines)]
+    fn released_presence_clears_readiness_and_rows_are_owned() {
         block_on(async {
             let db = database().await;
             let lobby_id = LobbyId::new(4);
             insert_lobby(&*db, lobby_id).await;
-            connect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(40), 0)
-                .await
-                .unwrap();
-            connect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(41), 0)
-                .await
-                .unwrap();
-            ready_lobby(&*db, lobby_id, AccountId::new(1), 0)
-                .await
-                .unwrap();
-            disconnect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(40))
-                .await
-                .unwrap();
-            let rows = db
-                .select("lobby_readiness")
-                .where_eq("connection_id", "41")
-                .execute(&*db)
+            insert_lobby(&*db, LobbyId::new(5)).await;
+            ready_lobby(
+                &*db,
+                lobby_id,
+                AccountId::new(1),
+                &[ConnectionId::new(40), ConnectionId::new(41)],
+                0,
+            )
+            .await
+            .unwrap();
+            // Re-readying the same presences is idempotent.
+            ready_lobby(
+                &*db,
+                lobby_id,
+                AccountId::new(1),
+                &[ConnectionId::new(40)],
+                1,
+            )
+            .await
+            .unwrap();
+            release_lobby_presence(&*db, ConnectionId::new(40))
                 .await
                 .unwrap();
             assert_eq!(
-                rows[0].get("ready").and_then(|value| value.as_i64()),
-                Some(1)
+                lobby_readiness(&*db, lobby_id, &live(&[40, 41]))
+                    .await
+                    .unwrap(),
+                (true, false)
             );
-            disconnect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(41))
+            release_lobby_presence(&*db, ConnectionId::new(41))
                 .await
                 .unwrap();
+            assert_eq!(
+                lobby_readiness(&*db, lobby_id, &live(&[40, 41]))
+                    .await
+                    .unwrap(),
+                (false, false)
+            );
+            ready_lobby(
+                &*db,
+                lobby_id,
+                AccountId::new(1),
+                &[ConnectionId::new(42)],
+                0,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                ready_lobby(
+                    &*db,
+                    LobbyId::new(5),
+                    AccountId::new(1),
+                    &[ConnectionId::new(42)],
+                    0
+                )
+                .await,
+                Err(LobbyStoreError::Malformed)
+            ));
+            assert!(matches!(
+                ready_lobby(
+                    &*db,
+                    lobby_id,
+                    AccountId::new(2),
+                    &[ConnectionId::new(42)],
+                    0
+                )
+                .await,
+                Err(LobbyStoreError::Malformed)
+            ));
+            clear_lobby_readiness(&*db, lobby_id).await.unwrap();
             assert!(
                 db.select("lobby_readiness")
-                    .where_eq("account_id", "1")
                     .execute(&*db)
                     .await
                     .unwrap()
                     .is_empty()
             );
-            assert!(matches!(
-                disconnect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(40)).await,
-                Err(LobbyStoreError::ConnectionNotFound)
-            ));
+            ready_lobby(
+                &*db,
+                lobby_id,
+                AccountId::new(2),
+                &[ConnectionId::new(43)],
+                0,
+            )
+            .await
+            .unwrap();
+            clear_lobby_presence(&*db).await.unwrap();
+            assert!(
+                db.select("lobby_readiness")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                db.select("waiting_lobbies")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .len(),
+                2
+            );
         });
     }
 
@@ -812,62 +850,30 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                lobby_ready(&*db, lobby_id, 0).await,
+                lobby_ready(&*db, lobby_id, &live(&[60])).await,
                 Err(LobbyStoreError::Malformed)
             ));
-            connect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(61), 0)
-                .await
-                .unwrap();
-            ready_lobby(&*db, lobby_id, AccountId::new(1), 0)
-                .await
-                .unwrap();
+            ready_lobby(
+                &*db,
+                lobby_id,
+                AccountId::new(1),
+                &[ConnectionId::new(61)],
+                0,
+            )
+            .await
+            .unwrap();
             assert!(matches!(
                 start_ready_lobby(
                     &*db,
                     lobby_id,
                     MatchId::new(60),
                     &state(),
-                    ScheduledDeadline {
-                        id: crate::DeadlineId {
-                            revision: 0,
-                            player: Player::One,
-                        },
-                        due_at: crate::DeadlineMillis::new(30_000),
-                    },
-                    0,
+                    deadline(&state()),
+                    &live(&[61]),
                 )
                 .await,
                 Err(LobbyStoreError::Malformed)
             ));
-        });
-    }
-
-    #[test]
-    fn connecting_prunes_expired_lobby_leases() {
-        block_on(async {
-            let db = database().await;
-            let lobby_id = LobbyId::new(5);
-            insert_lobby(&*db, lobby_id).await;
-            connect_lobby(&*db, lobby_id, AccountId::new(1), ConnectionId::new(50), 0)
-                .await
-                .unwrap();
-            connect_lobby(
-                &*db,
-                lobby_id,
-                AccountId::new(2),
-                ConnectionId::new(51),
-                15_001,
-            )
-            .await
-            .unwrap();
-            let rows = db
-                .select("lobby_readiness")
-                .where_eq("lobby_id", lobby_id.value().to_string())
-                .execute(&*db)
-                .await
-                .unwrap();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(parse_u128(&rows[0], "connection_id").unwrap(), 51);
         });
     }
 

@@ -31,7 +31,6 @@ web-sys = { workspace = true, features = [
     "BinaryType",
     "CloseEvent",
     "Crypto",
-    "ErrorEvent",
     "Event",
     "MessageEvent",
     "Performance",

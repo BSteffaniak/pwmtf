@@ -95,24 +95,66 @@ lobby_id=$(curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
 curl --fail --silent --show-error --cookie "$tmp/cookies" \
     "http://127.0.0.1:$port/api/lobbies" \
     | jq -e --arg lobby "$lobby_id" 'any(.[]; .lobby_id == $lobby and .status == "waiting")' >/dev/null
-connection_one=$(curl --fail --silent --show-error --cookie "$tmp/cookies" \
-    --request POST --header "Origin: http://127.0.0.1:$port" \
-    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
-    "http://127.0.0.1:$port/api/lobbies/$lobby_id" | jq -r '.connection_id')
-connection_two=$(curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
-    --request POST --header "Origin: http://127.0.0.1:$port" \
-    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
-    "http://127.0.0.1:$port/api/lobbies/$lobby_id" | jq -r '.connection_id')
-[ -n "$connection_one" ]
-[ -n "$connection_two" ]
+# Lobby presence is a live `/ws` connection subscribed to the lobby; ready
+# stays HTTP, and the match starts only once both seats are present and ready.
+cookie_one=$(sed -n 's/^[Ss]et-[Cc]ookie: \(pwmtf_dev_session=[^;]*\).*/\1/p' "$tmp/headers" | tr -d '\r')
+cookie_two=$(sed -n 's/^[Ss]et-[Cc]ookie: \(pwmtf_dev_session=[^;]*\).*/\1/p' "$tmp/headers-two" | tr -d '\r')
+[ -n "$cookie_one" ]
+[ -n "$cookie_two" ]
+match_id=$(cd "$root" && node - "$port" "$lobby_id" "$cookie_one" "$cookie_two" <<'JS'
+import { pathToFileURL } from "node:url";
+const session = await import(new URL("scripts/pwmtf-session-client.mjs", pathToFileURL(`${process.cwd()}/`)));
+const [port, lobbyId, cookieOne, cookieTwo] = process.argv.slice(2);
+const origin = `http://127.0.0.1:${port}`;
+const ready = (cookie) => fetch(`${origin}/api/lobbies/${lobbyId}/ready`, {
+  method: "POST",
+  headers: { Cookie: cookie, Origin: origin, "X-PWMTF-Origin": origin, Accept: "application/json" },
+});
+const one = await session.openSession({ port, cookie: cookieOne, origin, label: "local one" });
+const two = await session.openSession({ port, cookie: cookieTwo, origin, label: "local two" });
+try {
+  one.send(session.subscribeLobby(lobbyId));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const firstReady = await ready(cookieOne);
+  if (!firstReady.ok) throw new Error(`present player could not ready: ${firstReady.status}`);
+  const firstLobby = await firstReady.json();
+  if (firstLobby.status !== "waiting" || firstLobby.match_id !== null) {
+    throw new Error("lobby started with only one present player");
+  }
+  await one.next((message) => message.type === "lobby-changed" && message.lobbyId === lobbyId, 5_000, "LobbyChanged");
+  // Readiness without presence must not start the match.
+  const absentReady = await ready(cookieTwo);
+  if (absentReady.ok) {
+    const absentLobby = await absentReady.json();
+    if (absentLobby.status === "started" || absentLobby.match_id !== null) {
+      throw new Error("lobby started while the second player had no live connection");
+    }
+  }
+  two.send(session.subscribeLobby(lobbyId));
+  if (!absentReady.ok) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const presentReady = await ready(cookieTwo);
+    if (!presentReady.ok) throw new Error(`second present player could not ready: ${presentReady.status}`);
+  }
+  const started = await Promise.all([one, two].map((client) =>
+    client.next((message) => message.type === "match-started" && message.lobbyId === lobbyId, 5_000, "MatchStarted")));
+  if (started[0].matchId !== started[1].matchId) throw new Error("lobby members saw different started matches");
+  const states = await Promise.all([one, two].map((client) => session.subscribeToMatch(client, started[0].matchId)));
+  if (states[0].revision !== 0 || states[0].seat === states[1].seat || states[0].checksum !== states[1].checksum) {
+    throw new Error("started match did not give both members distinct seats at revision zero");
+  }
+  console.log(started[0].matchId);
+} finally {
+  one.close();
+  two.close();
+}
+JS
+)
+case "$match_id" in
+    ''|*[!0-9]*) printf '%s\n' "lobby presence did not start a match" >&2; exit 1 ;;
+esac
 curl --fail --silent --show-error --cookie "$tmp/cookies" \
-    --request POST --header "Origin: http://127.0.0.1:$port" \
-    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
-    "http://127.0.0.1:$port/api/lobbies/$lobby_id/ready" >/dev/null
-match_id=$(curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
-    --request POST --header "Origin: http://127.0.0.1:$port" \
-    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
-    "http://127.0.0.1:$port/api/lobbies/$lobby_id/ready" | jq -r '.match_id')
-[ "$match_id" != null ]
+    "http://127.0.0.1:$port/api/lobbies" \
+    | jq -e --arg lobby "$lobby_id" --arg match "$match_id" 'any(.[]; .lobby_id == $lobby and .status == "started" and .match_id == $match)' >/dev/null
 
 printf '%s\n' "local username login, social discovery, lobby readiness, and match start acceptance passed"

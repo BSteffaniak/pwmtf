@@ -12,11 +12,11 @@ mod rules;
 pub use corpus::{ShotFixture, qualification_corpus, qualification_profile};
 pub use rack::{RackError, RackSeed, standard_rack};
 pub use rules::{
-    CompletionReason, Foul, Group, MATCH_COMMAND_RESULT_VERSION, MATCH_COMMAND_VERSION,
-    MATCH_CONFIGURATION_VERSION, MATCH_STATE_VERSION, MatchCommand, MatchCommandResult,
-    MatchConfiguration, MatchDecodeError, MatchError, MatchOutcome, MatchResultDecodeError,
-    MatchState, MatchStatus, Player, RULES_PROFILE_VERSION, RematchMetadata, RulesProfile,
-    RulesProfileError, ShotResolution, VersionedMatchCommand,
+    AppliedCommand, CompletionReason, Foul, Group, MATCH_COMMAND_RESULT_VERSION,
+    MATCH_COMMAND_VERSION, MATCH_CONFIGURATION_VERSION, MATCH_STATE_VERSION, MatchCommand,
+    MatchCommandResult, MatchConfiguration, MatchDecodeError, MatchError, MatchOutcome,
+    MatchResultDecodeError, MatchState, MatchStatus, Player, RULES_PROFILE_VERSION,
+    RematchMetadata, RulesProfile, RulesProfileError, ShotResolution, VersionedMatchCommand,
 };
 
 /// Canonical table schema, including complete rolling and vertical spin state.
@@ -425,6 +425,13 @@ impl PhysicsProfile {
     #[must_use]
     pub const fn ticks_per_second(self) -> u16 {
         self.ticks_per_second
+    }
+
+    /// Returns the wall-clock duration of `ticks` fixed simulation ticks in
+    /// whole milliseconds, rounded up so playback is never under-budgeted.
+    #[must_use]
+    pub const fn playback_millis(self, ticks: u32) -> u64 {
+        playback_millis(self, ticks)
     }
 
     /// Returns the maximum simulated ticks for one shot.
@@ -1025,6 +1032,14 @@ pub fn advance_tick(
         events,
         settled,
     })
+}
+
+/// Converts fixed simulation ticks under `physics` into whole milliseconds,
+/// computed as `ceil(ticks * 1000 / ticks_per_second)`.
+#[must_use]
+pub const fn playback_millis(physics: PhysicsProfile, ticks: u32) -> u64 {
+    // `ticks_per_second` is validated non-zero by every constructor.
+    (ticks as u64 * 1_000).div_ceil(physics.ticks_per_second as u64)
 }
 
 /// Canonical shot simulation failure.

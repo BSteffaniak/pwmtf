@@ -47,6 +47,7 @@ def main() -> None:
         "rust-toolchain.toml",
         "packages/client/src/main.rs",
         "packages/client/web/bootstrap.js",
+        "packages/client/web/feasibility.js",
         "scripts/build-wasm.sh",
         "scripts/serve-wasm-bundle.py",
         "scripts/summarize-feasibility.py",

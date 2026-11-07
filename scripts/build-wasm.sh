@@ -36,7 +36,7 @@ for entry in output.iterdir():
         entry.unlink()
 PY
 cp packages/client/web/index.html packages/client/web/styles.css packages/client/web/bootstrap.js \
-    packages/client/web/brand-mark.svg packages/client/web/manifest.webmanifest \
+    packages/client/web/feasibility.js packages/client/web/brand-mark.svg packages/client/web/manifest.webmanifest \
     packages/client/web/install.js packages/client/web/icon-180.png \
     packages/client/web/icon-192.png packages/client/web/icon-512.png dist/
 wasm_optimization=not-applied
@@ -86,6 +86,7 @@ bundle_hash = hashlib.sha256()
 assets = sorted(
     (
         "brand-mark.svg",
+        "feasibility.js",
         "manifest.webmanifest",
         "install.js",
         "icon-180.png",

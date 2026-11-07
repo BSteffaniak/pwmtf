@@ -57,4 +57,19 @@ reset_fixture
 printf '%s\n' 'struct Row { session_token: String }' > "$tmp/packages/server/src/lib.rs"
 assert_rejected "a plaintext session token persistence field"
 
+reset_fixture
+mkdir -p "$tmp/packages/client/web"
+printf '%s\n' 'const url = `/ws?match_id=${matchId}`;' > "$tmp/packages/client/web/bootstrap.js"
+assert_rejected "a query-string browser match socket"
+
+reset_fixture
+mkdir -p "$tmp/packages/client/web"
+printf '%s\n' 'await fetch(`/api/matches/${matchId}`);' > "$tmp/packages/client/web/bootstrap.js"
+assert_rejected "browser match access polling"
+
+reset_fixture
+mkdir -p "$tmp/packages/client/web"
+printf '%s\n' 'apiRequest(`/api/lobbies/${id}/connections/${connection}`);' > "$tmp/packages/client/web/bootstrap.js"
+assert_rejected "durable lobby connection heartbeats"
+
 printf '%s\n' "architecture checker self-tests passed"

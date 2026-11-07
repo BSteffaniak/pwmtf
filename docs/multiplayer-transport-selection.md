@@ -2,7 +2,7 @@
 
 ## Decision
 
-PWMTF selects the focused secure-WebSocket protocol already implemented in `pwmtf_protocol`, `pwmtf_client`, and `pwmtf_server` for launch protocol version 1. Lightyear is rejected for the launch transport boundary.
+PWMTF selects the focused secure-WebSocket protocol implemented in `pwmtf_protocol`, `pwmtf_client`, and `pwmtf_server`. The session layer is version 2 (`SESSION_VERSION`): one binary, same-origin `/ws` socket per tab carries every match and lobby subscription of the account. The persisted `CommandEnvelope` and `SnapshotEnvelope` encodings keep their own version 1. Lightyear is rejected for the launch transport boundary.
 
 This decision does not reject Lightyear as a library in general. It rejects introducing its Bevy/ECS replication model into PWMTF's authoritative boundary after the focused protocol has already satisfied the product's narrower two-player, turn-based requirements.
 
@@ -11,12 +11,15 @@ This decision does not reject Lightyear as a library in general. It rejects intr
 The selected protocol provides:
 
 - Same-origin secure-WebSocket upgrades authenticated by hash-only secure session cookies.
-- Participant authorization for every match subscription and state-changing command.
+- Participant authorization for every match and lobby subscription and every state-changing command.
+- A mandatory `Hello`/`Welcome` version negotiation, binary-only tagged frames, and fail-closed decoding that closes the socket on any malformed, oversize, or text frame.
 - Bounded, explicitly versioned negotiation, commands, snapshots, and complete canonical payloads.
 - Revision checks and cryptographic command identifiers for idempotent acceptance.
 - Durable-before-acknowledgement command processing in the native server.
 - Server-owned absolute deadlines that continue without a client connection.
 - Complete settled snapshots for initialization, reconciliation, and reconnect.
+- Typed rejection reasons, and duplicate-tolerant retransmission of an unresolved command with the same identifier after reconnect.
+- Server pushes for lobby presence, readiness, match start, and social changes, so the browser does not poll.
 - Client prediction that runs the renderer-independent canonical domain and is abandoned or corrected on transport loss/divergence.
 - Multiple concurrent matches, tabs, and connections without selecting a primary client.
 - Browser lifecycle reconnect with bounded backoff.
@@ -33,19 +36,19 @@ The focused protocol also has a smaller security surface for the product: its on
 
 ## Replication and snapshot policy
 
-Launch protocol version 1 uses command/result snapshots rather than periodic component replication:
+Session version 2 publishes complete states with transition descriptions rather than periodic component replication:
 
-- Send a complete snapshot immediately after successful negotiation.
-- Send one complete settled snapshot after every accepted canonical command or authoritative timeout.
-- Send a complete current snapshot on reconnect.
-- Do not replicate intermediate canonical ball positions over the network for launch; local prediction and presentation interpolation provide responsiveness while the server resolves the same canonical command.
-- Keep command and snapshot bounds fixed and reject unknown protocol or canonical payload versions.
+- Send a complete `MatchState` immediately after each successful match subscription, including after reconnect.
+- After every accepted canonical command or authoritative timeout, broadcast one complete settled `MatchState` to every subscriber. It carries a `LastCommand` describing the transition from `revision - 1`: command identifier, actor, the canonical command, and the shot's `playback_ticks`. Initial, reconnect, duplicate, and post-rejection states carry none.
+- Observers that hold exactly the previous revision replay an accepted shot tick by tick from their own authoritative table, and the shooter plays its shot from release. Integer fixed-point physics makes the replay converge bit-exactly on the broadcast snapshot. Clients with a gap snap to the snapshot.
+- Do not send intermediate canonical ball positions over the network. The next turn deadline starts after the shot's authoritative playback (`now + playback + turn duration`), so presentation does not consume the next player's turn.
+- Keep command, snapshot, and session frame bounds fixed and reject unknown protocol, session, or canonical payload versions.
 
-This policy is appropriate for a two-player turn-based game and avoids an arbitrary cadence that would create bandwidth and ordering work without changing authority.
+This policy fits a two-player turn-based game and avoids an arbitrary streaming cadence that would create bandwidth and ordering work without changing authority.
 
 ## Revisit triggers
 
-Reconsider Lightyear or a different transport only if measured product behavior requires continuous authoritative state streaming that the settled-snapshot protocol cannot satisfy, or if browser impairment evidence reveals a defect that cannot be corrected within this protocol. Any replacement must preserve canonical-domain independence, durable-before-acknowledgement acceptance, exact recovery, bounded input, and protocol version compatibility.
+Reconsider Lightyear or a different transport only if measured product behavior requires continuous authoritative state streaming that settled snapshots plus deterministic shot replay cannot satisfy, or if browser impairment evidence reveals a defect that cannot be corrected within this protocol. Any replacement must preserve canonical-domain independence, durable-before-acknowledgement acceptance, exact recovery, bounded input, and protocol version compatibility.
 
 ## Sources
 

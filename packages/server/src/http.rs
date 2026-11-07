@@ -12,30 +12,22 @@ use std::{
 
 use axum::{
     Router,
-    extract::{
-        Path, Query, State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
-    },
+    extract::{Path, Query, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
-use tokio::sync::Mutex;
 
 use crate::{
     AccountId, ChallengeId, ConnectionId, GoogleOidcClient, Handle, InvitationId, LobbyId, MatchId,
-    MatchService, NewOidcAttempt, Participants, SessionCookiePolicy, SubscriptionRegistry,
-    SwitchyCommandJournal, accept_challenge_into_lobby, account_for_handle, assign_handle,
-    cancel_lobby, claim_oidc_attempt, connect_lobby, create_challenge, create_oidc_attempt,
-    create_stored_session, disconnect_lobby, generate_invitation, handle_for_account,
-    heartbeat_lobby, link_google_identity, load_lobby, lobbies_for_account, lobby_ready,
-    offer_rematch, pending_challenges_for, pending_rematches_for, ready_lobby,
+    NewOidcAttempt, Participants, SessionCookiePolicy, SwitchyCommandJournal,
+    accept_challenge_into_lobby, account_for_handle, assign_handle, cancel_lobby,
+    claim_oidc_attempt, create_challenge, create_oidc_attempt, create_stored_session,
+    generate_invitation, handle_for_account, link_google_identity, load_lobby, lobbies_for_account,
+    lobby_readiness, offer_rematch, pending_challenges_for, pending_rematches_for, realtime::Hub,
     redeem_invitation_token_into_lobby, resolve_session_token, revoke_session_token,
-    start_ready_lobby,
 };
-use pwmtf_protocol::{
-    CommandEnvelope, MAX_FRAME_BYTES, MAX_SNAPSHOT_FRAME_BYTES, SnapshotEnvelope, negotiate_version,
-};
+use pwmtf_protocol::MAX_CLIENT_MESSAGE_BYTES;
 use switchy_database::Database;
 use thiserror::Error;
 use tower_http::{
@@ -58,54 +50,61 @@ const CACHE_CONTROL_DYNAMIC: &str = "no-store";
 const CACHE_CONTROL_ASSET: &str = "no-cache";
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 const PERMISSIONS_POLICY: &str = "camera=(), geolocation=(), microphone=()";
-const SNAPSHOT_CHANNEL_CAPACITY: usize = 256;
 const READINESS_MAX_AGE_MS: u64 = 5_000;
-type PublishedSnapshot = (MatchId, SnapshotEnvelope);
-type PublishedPreview = (MatchId, AccountId, pwmtf_protocol::ShotPreview);
 
 /// Runtime services required by native HTTP/OIDC/WebSocket entry points.
 pub struct HttpState {
-    db: Arc<dyn Database>,
+    pub(crate) db: Arc<dyn Database>,
     oidc: Option<Arc<GoogleOidcClient>>,
     sessions: SessionCookiePolicy,
     origins: BTreeSet<String>,
     public_origin: String,
     development_login: bool,
-    subscriptions: Mutex<SubscriptionRegistry>,
-    snapshot_sender: tokio::sync::broadcast::Sender<PublishedSnapshot>,
-    preview_sender: tokio::sync::broadcast::Sender<PublishedPreview>,
-    matches: Mutex<MatchService<SwitchyCommandJournal>>,
+    pub(crate) hub: Hub,
     scheduler_healthy: AtomicBool,
     scheduler_last_success_ms: AtomicU64,
     web_root: Option<PathBuf>,
 }
 
 impl HttpState {
-    /// Polls and durably applies every currently due authoritative deadline,
-    /// publishing each resulting complete snapshot before another command can
-    /// advance the same in-process authority.
+    /// Polls and durably applies every currently due authoritative deadline.
+    ///
+    /// Each due match is applied under its own per-match authority lock
+    /// concurrently with the others, and its resulting state (with a `Timeout`
+    /// transition description) is broadcast to that match's subscribers before
+    /// another command can advance it. Stale or already-applied deadlines are
+    /// harmless no-ops, so each timeout applies exactly once.
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError`] when a timeout cannot be durably accepted or
-    /// its resulting snapshot cannot be encoded.
+    /// Returns [`TransportError`] when any due timeout cannot be durably
+    /// accepted or its resulting state cannot be encoded; other matches'
+    /// timeouts are still applied.
     pub async fn poll_due_deadlines(
         &self,
         now: crate::DeadlineMillis,
     ) -> Result<usize, TransportError> {
-        let mut matches = self.matches.lock().await;
-        let accepted = matches
-            .poll_due_deadlines(now)
-            .await
-            .map_err(|_| TransportError::Recovery)?;
-        for (match_id, _) in &accepted {
-            let snapshot = matches
-                .snapshot(*match_id)
-                .map_err(|_| TransportError::Recovery)?;
-            let _ = self.snapshot_sender.send((*match_id, snapshot));
+        let mut tasks = tokio::task::JoinSet::new();
+        for unit in self.hub.units() {
+            if unit
+                .deadline()
+                .is_some_and(|deadline| deadline.due_at <= now)
+            {
+                tasks.spawn(async move { unit.apply_due_deadline(now).await });
+            }
         }
-        let count = accepted.len();
-        drop(matches);
+        let mut count = 0;
+        let mut failed = false;
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(true)) => count += 1,
+                Ok(Ok(false)) => {}
+                Ok(Err(_)) | Err(_) => failed = true,
+            }
+        }
+        if failed {
+            return Err(TransportError::Recovery);
+        }
         self.scheduler_last_success_ms
             .store(now.value(), Ordering::Release);
         self.scheduler_healthy.store(true, Ordering::Release);
@@ -123,125 +122,25 @@ impl HttpState {
         Ok(())
     }
 
-    /// Returns the next currently scheduled deadline.
-    pub async fn next_deadline(&self) -> Option<crate::ScheduledDeadline> {
-        let matches = self.matches.lock().await;
-        let deadline = matches.next_deadline().map(|(_, deadline)| deadline);
-        drop(matches);
-        deadline
-    }
-
-    /// Executes one already-authenticated transport command through the
-    /// authoritative durable service and returns the resulting snapshot.
-    ///
-    /// This is the non-socket boundary used by impairment and transport tests.
+    /// Removes every durable lobby readiness row. Lobby presence is in-memory,
+    /// so no presence can be live when the process starts.
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError`] for internal clock or snapshot failures.
-    pub async fn apply_command_frame(
-        &self,
-        match_id: MatchId,
-        account: AccountId,
-        bytes: &[u8],
-    ) -> Result<Option<SnapshotEnvelope>, TransportError> {
-        match apply_transport_command(self, match_id, account, bytes).await? {
-            TransportCommandResponse::Accepted { snapshot } => Ok(Some(snapshot)),
-            TransportCommandResponse::Rejected { .. } => Ok(None),
-        }
-    }
-
-    async fn load_match(
-        &self,
-        match_id: MatchId,
-        participants: Participants,
-        state: pwmtf_game_domain::MatchState,
-        deadline: Option<crate::ScheduledDeadline>,
-    ) -> Result<(), TransportError> {
-        let mut matches = self.matches.lock().await;
-        match matches.participants(match_id) {
-            Some(loaded) if loaded == participants => return Ok(()),
-            Some(_) => return Err(TransportError::Recovery),
-            None => {}
-        }
-        matches
-            .load_initial_match(match_id, participants, state, deadline)
-            .map_err(|_| TransportError::Recovery)?;
-        drop(matches);
+    /// Returns [`TransportError`] when the delete fails.
+    pub async fn reset_lobby_presence(&self) -> Result<(), TransportError> {
+        crate::clear_lobby_presence(&*self.db).await?;
         Ok(())
     }
 
-    async fn ensure_match_loaded(
-        &self,
-        match_id: MatchId,
-        participants: Participants,
-    ) -> Result<(), TransportError> {
-        {
-            let matches = self.matches.lock().await;
-            match matches.participants(match_id) {
-                Some(loaded) if loaded == participants => return Ok(()),
-                Some(_) => return Err(TransportError::Recovery),
-                None => {}
-            }
-        }
-
-        let journal = SwitchyCommandJournal::new(Arc::clone(&self.db));
-        let records = crate::CommandJournal::load(&journal, match_id)
-            .await
-            .map_err(|_| TransportError::Recovery)?;
-        if records.is_empty() {
-            let (stored_participants, state, deadline) = journal
-                .initial_match(match_id)
-                .await
-                .map_err(|_| TransportError::Recovery)?;
-            if stored_participants != participants {
-                return Err(TransportError::Recovery);
-            }
-            self.load_match(match_id, participants, state, deadline)
-                .await?;
-            return Ok(());
-        }
-
-        let mut matches = self.matches.lock().await;
-        match matches.participants(match_id) {
-            Some(loaded) if loaded == participants => Ok(()),
-            Some(_) => Err(TransportError::Recovery),
-            None => matches
-                .recover_match(match_id, participants)
-                .await
-                .map_err(|_| TransportError::Recovery)?
-                .map(|_| ())
-                .ok_or(TransportError::Recovery),
-        }
-    }
-
-    /// Returns an initial/reconnect snapshot, recovering the durable match on
-    /// first access. Durable participants are loaded server-side; the caller
-    /// supplies only its authenticated account and opaque match identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransportError`] for missing/corrupt durable records or an
-    /// authenticated account that is not a participant.
-    pub async fn reconnect_snapshot(
-        &self,
-        match_id: MatchId,
-        account: AccountId,
-    ) -> Result<SnapshotEnvelope, TransportError> {
-        let stored = SwitchyCommandJournal::new(Arc::clone(&self.db))
-            .participants(match_id)
-            .await
-            .map_err(|_| TransportError::MatchNotFound)?;
-        if account != stored.player_one && account != stored.player_two {
-            return Err(TransportError::InvalidSubscription);
-        }
-        self.ensure_match_loaded(match_id, stored).await?;
-        let matches = self.matches.lock().await;
-        let snapshot = matches
-            .snapshot(match_id)
-            .map_err(|_| TransportError::MatchNotFound)?;
-        drop(matches);
-        Ok(snapshot)
+    /// Returns the earliest currently scheduled deadline.
+    #[allow(clippy::unused_async)]
+    pub async fn next_deadline(&self) -> Option<crate::ScheduledDeadline> {
+        self.hub
+            .units()
+            .iter()
+            .filter_map(|unit| unit.deadline())
+            .min_by_key(|deadline| deadline.due_at)
     }
 
     /// Recovers every durable match before serving traffic.
@@ -258,12 +157,11 @@ impl HttpState {
             .map_err(|_| TransportError::Recovery)?;
         let mut recovered = 0;
         for match_id in ids {
-            let journal = SwitchyCommandJournal::new(Arc::clone(&self.db));
             let participants = journal
                 .participants(match_id)
                 .await
                 .map_err(|_| TransportError::Recovery)?;
-            self.ensure_match_loaded(match_id, participants).await?;
+            self.match_unit(match_id, participants).await?;
             recovered += 1;
         }
         Ok(recovered)
@@ -294,19 +192,21 @@ impl HttpState {
             return Err(TransportError::Recovery);
         }
         let journal = SwitchyCommandJournal::new(Arc::clone(&self.db));
-        let durable_ids = journal
+        let mut durable_ids = journal
             .match_ids()
             .await
             .map_err(|_| TransportError::Recovery)?;
-        let loaded_heads = self.matches.lock().await.match_heads();
-        let loaded_ids = loaded_heads
-            .iter()
-            .map(|(match_id, ..)| *match_id)
-            .collect::<Vec<_>>();
-        if durable_ids != loaded_ids {
+        durable_ids.sort_unstable();
+        if durable_ids != self.hub.match_ids() {
             return Err(TransportError::Recovery);
         }
-        for (match_id, participants, revision, state, deadline) in loaded_heads {
+        let mut loaded_heads = Vec::new();
+        for match_id in durable_ids {
+            let unit = self.hub.unit(match_id).ok_or(TransportError::Recovery)?;
+            let head = unit.head().await.ok_or(TransportError::Recovery)?;
+            loaded_heads.push((match_id, head));
+        }
+        for (match_id, (participants, revision, state, deadline)) in loaded_heads {
             let (head_participants, head_revision, head_state, head_deadline) = journal
                 .canonical_head(match_id)
                 .await
@@ -332,9 +232,6 @@ impl HttpState {
     #[cfg(feature = "insecure")]
     #[must_use]
     pub fn development(db: Arc<dyn Database>, origin: &str) -> Self {
-        let matches = MatchService::new(SwitchyCommandJournal::new(Arc::clone(&db)));
-        let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
-        let (preview_sender, _) = tokio::sync::broadcast::channel(32);
         Self {
             db,
             oidc: None,
@@ -342,10 +239,7 @@ impl HttpState {
             origins: BTreeSet::from([origin.to_owned()]),
             public_origin: origin.to_owned(),
             development_login: true,
-            subscriptions: Mutex::new(SubscriptionRegistry::default()),
-            snapshot_sender,
-            preview_sender,
-            matches: Mutex::new(matches),
+            hub: Hub::default(),
             scheduler_healthy: AtomicBool::new(false),
             scheduler_last_success_ms: AtomicU64::new(0),
             web_root: None,
@@ -359,20 +253,34 @@ impl HttpState {
         oidc: Arc<GoogleOidcClient>,
         origins: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        let matches = MatchService::new(SwitchyCommandJournal::new(Arc::clone(&db)));
-        let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
-        let (preview_sender, _) = tokio::sync::broadcast::channel(32);
+        Self::with_identity_provider(db, Some(oidc), origins)
+    }
+
+    /// Creates production-policy state without any identity provider, for
+    /// native integration tests and smoke adapters that seed hash-only
+    /// sessions directly. Google login routes respond with 404 and no
+    /// development login exists.
+    #[must_use]
+    pub fn without_identity_provider(
+        db: Arc<dyn Database>,
+        origins: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::with_identity_provider(db, None, origins)
+    }
+
+    fn with_identity_provider(
+        db: Arc<dyn Database>,
+        oidc: Option<Arc<GoogleOidcClient>>,
+        origins: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self {
             db,
-            oidc: Some(oidc),
+            oidc,
             sessions: SessionCookiePolicy::production(),
             origins: origins.into_iter().map(Into::into).collect(),
             public_origin: CANONICAL_ORIGIN.to_owned(),
             development_login: false,
-            subscriptions: Mutex::new(SubscriptionRegistry::default()),
-            snapshot_sender,
-            preview_sender,
-            matches: Mutex::new(matches),
+            hub: Hub::default(),
             scheduler_healthy: AtomicBool::new(false),
             scheduler_last_success_ms: AtomicU64::new(0),
             web_root: None,
@@ -390,36 +298,6 @@ impl HttpState {
     #[must_use]
     pub fn web_root(&self) -> Option<&std::path::Path> {
         self.web_root.as_deref()
-    }
-
-    /// Creates transport state with an already-constructed authoritative service.
-    ///
-    /// This supports deterministic integration/impairment tests and process
-    /// startup recovery without introducing a second authority path.
-    #[must_use]
-    pub fn with_match_service(
-        db: Arc<dyn Database>,
-        oidc: Arc<GoogleOidcClient>,
-        origins: impl IntoIterator<Item = impl Into<String>>,
-        matches: MatchService<SwitchyCommandJournal>,
-    ) -> Self {
-        let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
-        let (preview_sender, _) = tokio::sync::broadcast::channel(32);
-        Self {
-            db,
-            oidc: Some(oidc),
-            sessions: SessionCookiePolicy::production(),
-            origins: origins.into_iter().map(Into::into).collect(),
-            public_origin: CANONICAL_ORIGIN.to_owned(),
-            development_login: false,
-            subscriptions: Mutex::new(SubscriptionRegistry::default()),
-            snapshot_sender,
-            preview_sender,
-            matches: Mutex::new(matches),
-            scheduler_healthy: AtomicBool::new(false),
-            scheduler_last_success_ms: AtomicU64::new(0),
-            web_root: None,
-        }
     }
 }
 
@@ -453,17 +331,11 @@ pub fn router(state: Arc<HttpState>) -> Router {
         .route("/api/lobbies", get(list_account_lobbies))
         .route(
             "/api/lobbies/{lobby_id}",
-            get(lobby_status)
-                .post(connect_waiting_lobby)
-                .delete(cancel_waiting_lobby),
+            get(lobby_status).delete(cancel_waiting_lobby),
         )
         .route(
             "/api/lobbies/{lobby_id}/ready",
             axum::routing::post(ready_waiting_lobby),
-        )
-        .route(
-            "/api/lobbies/{lobby_id}/connections/{connection_id}",
-            axum::routing::post(heartbeat_waiting_lobby).delete(disconnect_waiting_lobby),
         )
         .route("/api/rematches", get(list_pending_rematches))
         .route("/api/matches/{match_id}", get(match_access))
@@ -780,311 +652,23 @@ async fn google_callback(
     Ok(response)
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct WebSocketQuery {
-    match_id: String,
-}
-
-fn websocket_match_id(query: &WebSocketQuery) -> Result<MatchId, TransportError> {
-    if query.match_id.is_empty()
-        || query.match_id.len() > 39
-        || !query.match_id.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(TransportError::InvalidRequest);
-    }
-    query
-        .match_id
-        .parse::<u128>()
-        .map(MatchId::new)
-        .map_err(|_| TransportError::InvalidRequest)
-}
-
+/// Upgrades the single authenticated session socket. Origin and session are
+/// checked before the upgrade; every match and lobby subscription is then
+/// negotiated over the socket itself.
 async fn websocket(
     State(state): State<Arc<HttpState>>,
-    Query(query): Query<WebSocketQuery>,
     headers: HeaderMap,
-    upgrade: WebSocketUpgrade,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Result<Response, TransportError> {
     validate_origin(&headers, &state.origins)?;
     let account = authenticated_account(&state, &headers).await?;
+    let upgrade = upgrade.map_err(|_| TransportError::InvalidRequest)?;
     let connection = ConnectionId::new(random_u128()?);
-    let match_id = websocket_match_id(&query)?;
-    let durable_participants = SwitchyCommandJournal::new(Arc::clone(&state.db))
-        .participants(match_id)
-        .await
-        .map_err(|_| TransportError::MatchNotFound)?;
-    if account != durable_participants.player_one && account != durable_participants.player_two {
-        return Err(TransportError::InvalidSubscription);
-    }
-    state
-        .ensure_match_loaded(match_id, durable_participants)
-        .await?;
-    let participants = durable_participants;
-    {
-        let mut subscriptions = state.subscriptions.lock().await;
-        subscriptions.connect(connection, account);
-        subscriptions.subscribe(connection, match_id, participants)?;
-    }
-    let publication = state.snapshot_sender.subscribe();
-    let previews = state.preview_sender.subscribe();
-    let snapshot = state
-        .matches
-        .lock()
-        .await
-        .snapshot(match_id)
-        .map_err(|_| TransportError::MatchNotFound)?;
     Ok(upgrade
-        .max_message_size(MAX_SNAPSHOT_FRAME_BYTES)
-        .max_frame_size(MAX_SNAPSHOT_FRAME_BYTES)
-        .on_upgrade(move |socket| {
-            websocket_loop(
-                state,
-                socket,
-                connection,
-                match_id,
-                account,
-                snapshot,
-                publication,
-                previews,
-            )
-        })
+        .max_message_size(MAX_CLIENT_MESSAGE_BYTES)
+        .max_frame_size(MAX_CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| crate::realtime::run_session(state, socket, account, connection))
         .into_response())
-}
-
-async fn send_snapshot_if_subscribed(
-    state: &HttpState,
-    socket: &mut WebSocket,
-    connection: ConnectionId,
-    match_id: MatchId,
-    snapshot: &SnapshotEnvelope,
-) -> bool {
-    let subscribed = state
-        .subscriptions
-        .lock()
-        .await
-        .is_subscribed(connection, match_id);
-    subscribed
-        && socket
-            .send(Message::Binary(snapshot.to_bytes().into()))
-            .await
-            .is_ok()
-}
-
-async fn forward_publication(
-    state: &HttpState,
-    socket: &mut WebSocket,
-    connection: ConnectionId,
-    match_id: MatchId,
-    delivered_revision: &mut u64,
-    publication: Result<PublishedSnapshot, tokio::sync::broadcast::error::RecvError>,
-) -> bool {
-    let snapshot = match publication {
-        Ok((published_match, snapshot)) if published_match == match_id => Some(snapshot),
-        Ok(_) => return true,
-        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-            state.matches.lock().await.snapshot(match_id).ok()
-        }
-        Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
-    };
-    let Some(snapshot) = snapshot else {
-        return false;
-    };
-    if snapshot.revision <= *delivered_revision {
-        return true;
-    }
-    if send_snapshot_if_subscribed(state, socket, connection, match_id, &snapshot).await {
-        *delivered_revision = snapshot.revision;
-        true
-    } else {
-        false
-    }
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn websocket_loop(
-    state: Arc<HttpState>,
-    mut socket: WebSocket,
-    connection: ConnectionId,
-    match_id: MatchId,
-    account: AccountId,
-    initial_snapshot: SnapshotEnvelope,
-    mut publication: tokio::sync::broadcast::Receiver<PublishedSnapshot>,
-    mut previews: tokio::sync::broadcast::Receiver<PublishedPreview>,
-) {
-    let mut negotiated = false;
-    let mut delivered_revision = initial_snapshot.revision;
-    let mut last_preview: Option<(std::time::Instant, bool)> = None;
-    let mut preview_order: Option<(u64, u64, u32)> = None;
-    let mut outbound_order: Option<(u64, u32)> = None;
-    loop {
-        tokio::select! {
-            preview = previews.recv(), if negotiated => {
-                if let Ok((preview_match, sender, value)) = preview
-                    && preview_match == match_id && sender != account {
-                        let matches = state.matches.lock().await;
-                        let valid = matches.match_state(match_id).is_some_and(|(revision, match_state)| {
-                            revision == value.revision
-                                && matches.participants(match_id).and_then(|participants| participants.player_for(account)).is_some_and(|player| player != match_state.active_player())
-                                && matches!(match_state.status(), pwmtf_game_domain::MatchStatus::InProgress)
-                                && matches.deadline(match_id).is_some_and(|deadline| deadline.due_at.value() > unix_millis().unwrap_or(u64::MAX))
-                        });
-                        drop(matches);
-                        if valid && state.subscriptions.lock().await.is_subscribed(connection, match_id)
-                            && outbound_order.is_none_or(|(revision, sequence)| revision != value.revision || value.sequence > sequence) {
-                            outbound_order = Some((value.revision, value.sequence));
-                            if socket.send(Message::Binary(value.to_bytes().to_vec().into())).await.is_err() { break; }
-                        }
-                }
-            }
-            published = publication.recv(), if negotiated => {
-                if !forward_publication(
-                    &state,
-                    &mut socket,
-                    connection,
-                    match_id,
-                    &mut delivered_revision,
-                    published,
-                )
-                .await
-                {
-                    break;
-                }
-            }
-            message = socket.recv() => {
-                let Some(message) = message else {
-                    break;
-                };
-                match message {
-                    Ok(Message::Text(text)) if !negotiated => {
-                        let versions = text
-                            .split(',')
-                            .map(str::parse::<u16>)
-                            .collect::<Result<Vec<_>, _>>();
-                        let Some(version) = versions.ok().and_then(|versions| {
-                            negotiate_version(&versions, &[pwmtf_protocol::PROTOCOL_VERSION]).ok()
-                        }) else {
-                            let _ = socket.send(Message::Text("rejected".into())).await;
-                            break;
-                        };
-                        if socket
-                            .send(Message::Text(version.to_string().into()))
-                            .await
-                            .is_err()
-                            || socket
-                                .send(Message::Binary(initial_snapshot.to_bytes().into()))
-                                .await
-                                .is_err()
-                        {
-                            break;
-                        }
-                        negotiated = true;
-                    }
-                    Ok(Message::Binary(bytes)) if negotiated && bytes.first() == Some(&pwmtf_protocol::PREVIEW_MARKER) => {
-                        if let Ok(preview) = pwmtf_protocol::ShotPreview::from_bytes(&bytes) {
-                            let now = std::time::Instant::now();
-                            if last_preview.is_none_or(|(at, canceled)| now.duration_since(at) >= Duration::from_millis(40) || preview.cancel && !canceled) {
-                                let matches = state.matches.lock().await;
-                                let valid = matches.match_state(match_id).is_some_and(|(revision, match_state)| {
-                                    revision == preview.revision
-                                        && matches.participants(match_id).and_then(|participants| participants.player_for(account)).is_some_and(|player| player == match_state.active_player())
-                                        && matches!(match_state.status(), pwmtf_game_domain::MatchStatus::InProgress)
-                                        && matches.deadline(match_id).is_some_and(|deadline| deadline.due_at.value() > unix_millis().unwrap_or(u64::MAX))
-                                });
-                                drop(matches);
-                                if valid && state.subscriptions.lock().await.is_subscribed(connection, match_id)
-                                    && preview_order.is_none_or(|(revision, _, sequence)| revision != preview.revision || preview.sequence > sequence) {
-                                    last_preview = Some((now, preview.cancel));
-                                    preview_order = Some((preview.revision, preview.gesture, preview.sequence));
-                                    let _ = state.preview_sender.send((match_id, account, preview));
-                                }
-                            }
-                        }
-                    }
-                    Ok(Message::Binary(bytes)) if negotiated && bytes.len() <= MAX_FRAME_BYTES => {
-                        match apply_transport_command(&state, match_id, account, &bytes).await {
-                            Ok(TransportCommandResponse::Accepted { snapshot }) => {
-                                delivered_revision = delivered_revision.max(snapshot.revision);
-                                if socket
-                                    .send(Message::Binary(snapshot.to_bytes().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(TransportCommandResponse::Rejected { snapshot }) => {
-                                if socket.send(Message::Text("rejected".into())).await.is_err() {
-                                    break;
-                                }
-                                delivered_revision = delivered_revision.max(snapshot.revision);
-                                if socket
-                                    .send(Message::Binary(snapshot.to_bytes().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                if socket.send(Message::Text("rejected".into())).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Ok(Message::Text(_) | Message::Binary(_) | Message::Close(_)) | Err(_) => break,
-                    Ok(_) => {}
-                }
-            }
-        }
-    }
-    state.subscriptions.lock().await.disconnect(connection);
-}
-
-#[derive(Debug)]
-enum TransportCommandResponse {
-    Accepted { snapshot: SnapshotEnvelope },
-    Rejected { snapshot: SnapshotEnvelope },
-}
-
-async fn apply_transport_command(
-    state: &HttpState,
-    match_id: MatchId,
-    account: AccountId,
-    bytes: &[u8],
-) -> Result<TransportCommandResponse, TransportError> {
-    let Ok(envelope) = CommandEnvelope::from_bytes(bytes) else {
-        return Ok(TransportCommandResponse::Rejected {
-            snapshot: state
-                .matches
-                .lock()
-                .await
-                .snapshot(match_id)
-                .map_err(|_| TransportError::Internal)?,
-        });
-    };
-    let mut matches = state.matches.lock().await;
-    let Ok(_acknowledgement) = matches
-        .apply_at(
-            match_id,
-            account,
-            envelope,
-            crate::DeadlineMillis::new(unix_millis()?),
-        )
-        .await
-    else {
-        return Ok(TransportCommandResponse::Rejected {
-            snapshot: matches
-                .snapshot(match_id)
-                .map_err(|_| TransportError::Internal)?,
-        });
-    };
-    let snapshot = matches
-        .snapshot(match_id)
-        .map_err(|_| TransportError::Internal)?;
-    drop(matches);
-    let _ = state.snapshot_sender.send((match_id, snapshot.clone()));
-    Ok(TransportCommandResponse::Accepted { snapshot })
 }
 
 fn validate_state_change_origin(
@@ -1168,19 +752,19 @@ fn account_id(identity: &crate::GoogleIdentity) -> AccountId {
     AccountId::new(u128::from_be_bytes(bytes))
 }
 
-fn random_u64() -> Result<u64, TransportError> {
+pub fn random_u64() -> Result<u64, TransportError> {
     let mut bytes = [0_u8; 8];
     getrandom::fill(&mut bytes).map_err(|_| TransportError::Internal)?;
     Ok(u64::from_be_bytes(bytes))
 }
 
-fn random_u128() -> Result<u128, TransportError> {
+pub fn random_u128() -> Result<u128, TransportError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| TransportError::Internal)?;
     Ok(u128::from_be_bytes(bytes))
 }
 
-fn unix_millis() -> Result<u64, TransportError> {
+pub fn unix_millis() -> Result<u64, TransportError> {
     let duration = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| TransportError::Internal)?;
@@ -1241,9 +825,6 @@ pub enum TransportError {
     /// Social persistence or lifecycle transition failed.
     #[error(transparent)]
     Social(#[from] crate::SocialStoreError),
-    /// Match subscription authorization failed.
-    #[error(transparent)]
-    Subscription(#[from] crate::SubscriptionError),
 }
 
 impl TransportError {
@@ -1252,9 +833,6 @@ impl TransportError {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::InvalidOrigin
             | Self::InvalidSubscription
-            | Self::Subscription(
-                crate::SubscriptionError::Unauthenticated | crate::SubscriptionError::Unauthorized,
-            )
             | Self::Lobby(crate::LobbyStoreError::Unauthorized)
             | Self::Rematch(crate::RematchStoreError::Unauthorized)
             | Self::Social(crate::SocialStoreError::Unauthorized) => StatusCode::FORBIDDEN,
@@ -1271,7 +849,6 @@ impl TransportError {
             | Self::Lobby(
                 crate::LobbyStoreError::NotWaiting
                 | crate::LobbyStoreError::NotConnected
-                | crate::LobbyStoreError::ConnectionNotFound
                 | crate::LobbyStoreError::NotReady,
             )
             | Self::Rematch(
@@ -1452,6 +1029,7 @@ async fn challenge_handle(
         .ok_or(TransportError::SocialNotFound)?;
     let id = ChallengeId::new(random_u128()?);
     create_challenge(&*state.db, id, actor, target).await?;
+    state.notify_social(&[actor, target]);
     Ok(axum::Json(ChallengeResponse {
         challenge_id: id.value().to_string(),
     }))
@@ -1465,13 +1043,14 @@ async fn accept_challenge(
     validate_state_change_origin(&headers, &state.origins)?;
     let actor = authenticated_account(&state, &headers).await?;
     let requested_lobby_id = LobbyId::new(random_u128()?);
-    let (_, lobby_id) = accept_challenge_into_lobby(
+    let (participants, lobby_id) = accept_challenge_into_lobby(
         &*state.db,
         ChallengeId::new(challenge_id),
         actor,
         requested_lobby_id,
     )
     .await?;
+    state.notify_social(&[participants.player_one, participants.player_two]);
     Ok(axum::Json(lobby_response(lobby_id)))
 }
 
@@ -1518,18 +1097,72 @@ async fn redeem_invitation_link(
     let actor = authenticated_account(&state, &headers).await?;
     let request = payload.map_err(|_| TransportError::InvalidRequest)?.0;
     let lobby_id = LobbyId::new(random_u128()?);
-    redeem_invitation_token_into_lobby(&*state.db, &request.token, actor, lobby_id, unix_millis()?)
-        .await?;
+    let participants = redeem_invitation_token_into_lobby(
+        &*state.db,
+        &request.token,
+        actor,
+        lobby_id,
+        unix_millis()?,
+    )
+    .await?;
+    state.notify_social(&[participants.player_one, participants.player_two]);
     Ok(axum::Json(lobby_response(lobby_id)))
 }
 
+/// Lobby view. Presence and readiness are reported only for the requesting
+/// participant and "the opponent"; participant identifiers are never exposed.
 #[derive(Debug, serde::Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct LobbyStatusResponse {
     lobby_id: String,
     status: &'static str,
     match_id: Option<String>,
     both_ready: bool,
-    connection_id: Option<String>,
+    self_present: bool,
+    self_ready: bool,
+    opponent_present: bool,
+    opponent_ready: bool,
+}
+
+/// Live presence/readiness of one waiting lobby, from the requester's seat.
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct LobbyLiveness {
+    self_present: bool,
+    self_ready: bool,
+    opponent_present: bool,
+    opponent_ready: bool,
+}
+
+impl HttpState {
+    async fn lobby_liveness(
+        &self,
+        record: crate::LobbyRecord,
+        actor: AccountId,
+    ) -> Result<LobbyLiveness, TransportError> {
+        if record.status != crate::LobbyStatus::Waiting {
+            return Ok(LobbyLiveness::default());
+        }
+        let opponent = if actor == record.participants.player_one {
+            record.participants.player_two
+        } else {
+            record.participants.player_one
+        };
+        let live = self.hub.lobby_presences(record.id);
+        let (player_one_ready, player_two_ready) =
+            lobby_readiness(&*self.db, record.id, &live).await?;
+        let (self_ready, opponent_ready) = if actor == record.participants.player_one {
+            (player_one_ready, player_two_ready)
+        } else {
+            (player_two_ready, player_one_ready)
+        };
+        Ok(LobbyLiveness {
+            self_present: self.hub.account_present(record.id, actor),
+            self_ready,
+            opponent_present: self.hub.account_present(record.id, opponent),
+            opponent_ready,
+        })
+    }
 }
 
 async fn list_account_lobbies(
@@ -1540,12 +1173,8 @@ async fn list_account_lobbies(
     let records = lobbies_for_account(&*state.db, actor).await?;
     let mut response = Vec::with_capacity(records.len());
     for record in records {
-        let both_ready = if record.status == crate::LobbyStatus::Waiting {
-            lobby_ready(&*state.db, record.id, unix_millis()?).await?
-        } else {
-            false
-        };
-        response.push(lobby_status_response(record, both_ready));
+        let liveness = state.lobby_liveness(record, actor).await?;
+        response.push(lobby_status_response(record, liveness));
     }
     Ok(axum::Json(response))
 }
@@ -1599,27 +1228,19 @@ async fn match_access(
     headers: HeaderMap,
 ) -> Result<axum::Json<MatchAccessResponse>, TransportError> {
     let actor = authenticated_account(&state, &headers).await?;
-    let match_id = MatchId::new(match_id);
-    let participants = SwitchyCommandJournal::new(Arc::clone(&state.db))
-        .participants(match_id)
-        .await
-        .map_err(|_| TransportError::MatchNotFound)?;
-    state.ensure_match_loaded(match_id, participants).await?;
-    let matches = state.matches.lock().await;
-    let (revision, match_state) = matches
-        .match_state(match_id)
-        .ok_or(TransportError::MatchNotFound)?;
-    let deadline = matches.deadline(match_id);
-    let response = match_access_response(
+    let unit = state
+        .authorized_match_unit(MatchId::new(match_id), actor)
+        .await?;
+    let (participants, revision, match_state, deadline) =
+        unit.head().await.ok_or(TransportError::MatchNotFound)?;
+    Ok(axum::Json(match_access_response(
         participants,
         actor,
         revision,
-        match_state,
+        &match_state,
         deadline,
         unix_millis()?,
-    )?;
-    drop(matches);
-    Ok(axum::Json(response))
+    )?))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1650,7 +1271,14 @@ async fn create_rematch_offer(
 ) -> Result<StatusCode, TransportError> {
     validate_state_change_origin(&headers, &state.origins)?;
     let actor = authenticated_account(&state, &headers).await?;
-    offer_rematch(&*state.db, MatchId::new(match_id), actor).await?;
+    let match_id = MatchId::new(match_id);
+    offer_rematch(&*state.db, match_id, actor).await?;
+    if let Ok(participants) = SwitchyCommandJournal::new(Arc::clone(&state.db))
+        .participants(match_id)
+        .await
+    {
+        state.notify_social(&[participants.player_one, participants.player_two]);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1678,15 +1306,18 @@ async fn accept_rematch_offer(
         .participants(new_match_id)
         .await
         .map_err(|_| TransportError::Recovery)?;
-    state
-        .ensure_match_loaded(new_match_id, participants)
-        .await?;
+    state.match_unit(new_match_id, participants).await?;
+    // A rematch has no lobby; `MatchStarted` carries lobby id 0.
+    state.notify_match_started(participants, None, new_match_id);
     Ok(axum::Json(LobbyStatusResponse {
         lobby_id: String::new(),
         status: "started",
         match_id: Some(new_match_id.value().to_string()),
         both_ready: true,
-        connection_id: None,
+        self_present: false,
+        self_ready: false,
+        opponent_present: false,
+        opponent_ready: false,
     }))
 }
 
@@ -1700,63 +1331,13 @@ async fn lobby_status(
         .await?
         .ok_or(TransportError::SocialNotFound)?;
     authorize_lobby_member(record.participants, actor)?;
-    let both_ready = record.status == crate::LobbyStatus::Waiting
-        && lobby_ready(&*state.db, record.id, unix_millis()?).await?;
-    Ok(axum::Json(lobby_status_response(record, both_ready)))
+    let liveness = state.lobby_liveness(record, actor).await?;
+    Ok(axum::Json(lobby_status_response(record, liveness)))
 }
 
-async fn connect_waiting_lobby(
-    State(state): State<Arc<HttpState>>,
-    Path(lobby_id): Path<u128>,
-    headers: HeaderMap,
-) -> Result<axum::Json<LobbyStatusResponse>, TransportError> {
-    validate_state_change_origin(&headers, &state.origins)?;
-    let actor = authenticated_account(&state, &headers).await?;
-    let connection = ConnectionId::new(random_u128()?);
-    let now = unix_millis()?;
-    let record = connect_lobby(&*state.db, LobbyId::new(lobby_id), actor, connection, now).await?;
-    let mut response = lobby_status_response(record, false);
-    response.connection_id = Some(connection.value().to_string());
-    Ok(axum::Json(response))
-}
-
-async fn heartbeat_waiting_lobby(
-    State(state): State<Arc<HttpState>>,
-    Path((lobby_id, connection_id)): Path<(u128, u128)>,
-    headers: HeaderMap,
-) -> Result<axum::Json<LobbyStatusResponse>, TransportError> {
-    validate_state_change_origin(&headers, &state.origins)?;
-    let actor = authenticated_account(&state, &headers).await?;
-    let record = heartbeat_lobby(
-        &*state.db,
-        LobbyId::new(lobby_id),
-        actor,
-        ConnectionId::new(connection_id),
-        unix_millis()?,
-    )
-    .await?;
-    let both_ready = lobby_ready(&*state.db, record.id, unix_millis()?).await?;
-    Ok(axum::Json(lobby_status_response(record, both_ready)))
-}
-
-async fn disconnect_waiting_lobby(
-    State(state): State<Arc<HttpState>>,
-    Path((lobby_id, connection_id)): Path<(u128, u128)>,
-    headers: HeaderMap,
-) -> Result<axum::Json<LobbyStatusResponse>, TransportError> {
-    validate_state_change_origin(&headers, &state.origins)?;
-    let actor = authenticated_account(&state, &headers).await?;
-    let record = disconnect_lobby(
-        &*state.db,
-        LobbyId::new(lobby_id),
-        actor,
-        ConnectionId::new(connection_id),
-    )
-    .await?;
-    let both_ready = lobby_ready(&*state.db, record.id, unix_millis()?).await?;
-    Ok(axum::Json(lobby_status_response(record, both_ready)))
-}
-
+/// Records explicit readiness. The actor must hold a live lobby presence
+/// (an active `SubscribeLobby` on a session socket), else 409. The match
+/// starts atomically when both participants are present and ready.
 async fn ready_waiting_lobby(
     State(state): State<Arc<HttpState>>,
     Path(lobby_id): Path<u128>,
@@ -1764,39 +1345,11 @@ async fn ready_waiting_lobby(
 ) -> Result<axum::Json<LobbyStatusResponse>, TransportError> {
     validate_state_change_origin(&headers, &state.origins)?;
     let actor = authenticated_account(&state, &headers).await?;
-    let now = unix_millis()?;
-    let record = ready_lobby(&*state.db, LobbyId::new(lobby_id), actor, now).await?;
-    let both_ready = lobby_ready(&*state.db, record.id, now).await?;
-    let record = if both_ready {
-        let state_match = pwmtf_game_domain::MatchState::new(
-            pwmtf_game_domain::RulesProfile::standard(),
-            pwmtf_game_domain::PhysicsProfile::standard(),
-            pwmtf_game_domain::TableGeometry::standard(),
-            pwmtf_game_domain::RackSeed::new(random_u64()?),
-            pwmtf_game_domain::Player::One,
-        )
-        .map_err(|_| TransportError::Internal)?;
-        let deadline = crate::ScheduledDeadline {
-            id: crate::DeadlineId {
-                revision: 0,
-                player: state_match.active_player(),
-            },
-            due_at: crate::DeadlineMillis::after_turn(
-                crate::DeadlineMillis::new(now),
-                state_match.rules(),
-            ),
-        };
-        let match_id = MatchId::new(random_u128()?);
-        let record =
-            start_ready_lobby(&*state.db, record.id, match_id, &state_match, deadline, now).await?;
-        state
-            .ensure_match_loaded(match_id, record.participants)
-            .await?;
-        record
-    } else {
-        record
-    };
-    Ok(axum::Json(lobby_status_response(record, both_ready)))
+    let record = state
+        .ready_lobby_member(LobbyId::new(lobby_id), actor)
+        .await?;
+    let liveness = state.lobby_liveness(record, actor).await?;
+    Ok(axum::Json(lobby_status_response(record, liveness)))
 }
 
 async fn cancel_waiting_lobby(
@@ -1807,7 +1360,16 @@ async fn cancel_waiting_lobby(
     validate_state_change_origin(&headers, &state.origins)?;
     let actor = authenticated_account(&state, &headers).await?;
     let record = cancel_lobby(&*state.db, LobbyId::new(lobby_id), actor).await?;
-    Ok(axum::Json(lobby_status_response(record, false)))
+    state.retire_lobby_presence(record.id).await;
+    state.notify_lobby_changed(record);
+    state.notify_social(&[
+        record.participants.player_one,
+        record.participants.player_two,
+    ]);
+    Ok(axum::Json(lobby_status_response(
+        record,
+        LobbyLiveness::default(),
+    )))
 }
 
 fn authorize_lobby_member(
@@ -1821,7 +1383,10 @@ fn authorize_lobby_member(
     }
 }
 
-fn lobby_status_response(record: crate::LobbyRecord, both_ready: bool) -> LobbyStatusResponse {
+fn lobby_status_response(
+    record: crate::LobbyRecord,
+    liveness: LobbyLiveness,
+) -> LobbyStatusResponse {
     let (status, match_id) = match record.status {
         crate::LobbyStatus::Waiting => ("waiting", None),
         crate::LobbyStatus::Started { match_id } => ("started", Some(match_id.value().to_string())),
@@ -1831,8 +1396,11 @@ fn lobby_status_response(record: crate::LobbyRecord, both_ready: bool) -> LobbyS
         lobby_id: record.id.value().to_string(),
         status,
         match_id,
-        both_ready,
-        connection_id: None,
+        both_ready: liveness.self_ready && liveness.opponent_ready,
+        self_present: liveness.self_present,
+        self_ready: liveness.self_ready,
+        opponent_present: liveness.opponent_present,
+        opponent_ready: liveness.opponent_ready,
     }
 }
 
@@ -1955,7 +1523,7 @@ mod tests {
                     match_id: MatchId::new(8),
                 },
             },
-            false,
+            LobbyLiveness::default(),
         );
         assert_eq!(response.status, "started");
         assert_eq!(response.match_id.as_deref(), Some("8"));
@@ -2038,25 +1606,6 @@ mod tests {
         assert!(validate_state_change_origin(&headers, &allowed).is_err());
         headers.remove(header::ORIGIN);
         assert!(validate_state_change_origin(&headers, &allowed).is_ok());
-    }
-
-    #[test]
-    fn websocket_match_identifiers_are_bounded_and_portably_parsed() {
-        assert_eq!(
-            websocket_match_id(&WebSocketQuery {
-                match_id: u128::MAX.to_string(),
-            })
-            .unwrap(),
-            MatchId::new(u128::MAX)
-        );
-        for value in ["", "-1", "7x", "340282366920938463463374607431768211456"] {
-            assert!(matches!(
-                websocket_match_id(&WebSocketQuery {
-                    match_id: value.to_owned(),
-                }),
-                Err(TransportError::InvalidRequest)
-            ));
-        }
     }
 
     #[test]

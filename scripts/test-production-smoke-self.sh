@@ -66,7 +66,7 @@ case "$url" in
         printf 'HTTP/1.1 %s Unauthorized\r\nContent-Type: text/plain\r\n\r\n' "${PWMTF_FAKE_PROTECTED_STATUS:-401}" >"$headers"
         printf '%s' "${PWMTF_FAKE_PROTECTED_BODY-request is not authenticated}" >"$body"
         ;;
-    https://pwmtf.hyperchad.dev/ws\?match_id=0)
+    https://pwmtf.hyperchad.dev/ws)
         printf 'HTTP/1.1 %s Unauthorized\r\nContent-Type: text/plain\r\n\r\n' "${PWMTF_FAKE_WEBSOCKET_STATUS:-401}" >"$headers"
         printf '%s' "${PWMTF_FAKE_WEBSOCKET_BODY-request is not authenticated}" >"$body"
         ;;

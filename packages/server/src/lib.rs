@@ -3,10 +3,7 @@
 #![allow(clippy::multiple_crate_versions)]
 //! Authoritative match command processing and recovery boundaries.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-};
+use std::{collections::BTreeMap, future::Future};
 
 use pwmtf_game_domain::{MatchCommandResult, MatchState, Player};
 use pwmtf_protocol::{CommandEnvelope, CommandId, SnapshotEnvelope};
@@ -24,6 +21,7 @@ mod oidc;
 mod oidc_store;
 mod profile_store;
 mod projection_store;
+mod realtime;
 mod rematch_store;
 mod session_store;
 mod social;
@@ -49,8 +47,9 @@ pub use lobby::{
     LobbyTransition,
 };
 pub use lobby_store::{
-    LobbyStoreError, cancel_lobby, connect_lobby, disconnect_lobby, heartbeat_lobby, load_lobby,
-    lobbies_for_account, lobby_ready, ready_lobby, start_ready_lobby,
+    LobbyStoreError, cancel_lobby, clear_lobby_presence, clear_lobby_readiness, load_lobby,
+    lobbies_for_account, lobby_readiness, lobby_ready, ready_lobby, release_lobby_presence,
+    start_ready_lobby,
 };
 pub use migrations::{migrate, migrations};
 pub use oidc::{GOOGLE_ISSUER, GoogleOidcClient, GoogleOidcError, OidcAttempt};
@@ -60,6 +59,10 @@ pub use oidc_store::{
 };
 pub use profile_store::{ProfileStoreError, account_for_handle, assign_handle, handle_for_account};
 pub use projection_store::{MatchSummary, ProjectionError, match_summary, rebuild_match_summaries};
+pub use realtime::{
+    HELLO_TIMEOUT, IDLE_TIMEOUT, MAX_LOBBY_SUBSCRIPTIONS, MAX_MATCH_SUBSCRIPTIONS,
+    PREVIEW_MIN_INTERVAL,
+};
 pub use rematch_store::{
     PendingRematch, RematchStoreError, accept_rematch, offer_rematch, pending_rematches_for,
 };
@@ -115,6 +118,27 @@ impl DeadlineMillis {
         Self(now.0.saturating_add(rules.turn_duration_millis()))
     }
 
+    /// Creates the next turn deadline after an accepted command: the turn
+    /// starts only once the authoritative shot playback has finished, so the
+    /// due time is `now + playback_millis(physics, playback_ticks) + turn`.
+    ///
+    /// Placement, timeout, and concession commands report zero playback ticks.
+    #[must_use]
+    pub const fn after_playback_and_turn(
+        now: Self,
+        physics: pwmtf_game_domain::PhysicsProfile,
+        playback_ticks: u32,
+        rules: pwmtf_game_domain::RulesProfile,
+    ) -> Self {
+        Self::after_turn(
+            Self(
+                now.0
+                    .saturating_add(physics.playback_millis(playback_ticks)),
+            ),
+            rules,
+        )
+    }
+
     /// Returns the absolute millisecond value.
     #[must_use]
     pub const fn value(self) -> u64 {
@@ -158,86 +182,6 @@ impl ConnectionId {
     }
 }
 
-/// Authorized live match subscription registry.
-#[derive(Default)]
-pub struct SubscriptionRegistry {
-    connections: BTreeMap<ConnectionId, AccountId>,
-    subscriptions: BTreeMap<MatchId, BTreeSet<ConnectionId>>,
-}
-
-impl SubscriptionRegistry {
-    /// Registers an authenticated connection.
-    pub fn connect(&mut self, connection: ConnectionId, account: AccountId) {
-        self.connections.insert(connection, account);
-    }
-
-    /// Removes a connection and all of its subscriptions.
-    pub fn disconnect(&mut self, connection: ConnectionId) {
-        self.connections.remove(&connection);
-        for connections in self.subscriptions.values_mut() {
-            connections.remove(&connection);
-        }
-        self.subscriptions
-            .retain(|_, connections| !connections.is_empty());
-    }
-
-    /// Authorizes a connection to subscribe to one match.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SubscriptionError`] when the connection is unauthenticated or
-    /// its account is not one of the match participants.
-    pub fn subscribe(
-        &mut self,
-        connection: ConnectionId,
-        match_id: MatchId,
-        participants: Participants,
-    ) -> Result<(), SubscriptionError> {
-        let account = self
-            .connections
-            .get(&connection)
-            .copied()
-            .ok_or(SubscriptionError::Unauthenticated)?;
-        participants
-            .player_for(account)
-            .ok_or(SubscriptionError::Unauthorized)?;
-        self.subscriptions
-            .entry(match_id)
-            .or_default()
-            .insert(connection);
-        Ok(())
-    }
-
-    /// Returns subscribed connections in stable identifier order.
-    #[must_use]
-    pub fn subscribers(&self, match_id: MatchId) -> Vec<ConnectionId> {
-        self.subscriptions
-            .get(&match_id)
-            .map_or_else(Vec::new, |connections| {
-                connections.iter().copied().collect()
-            })
-    }
-
-    /// Returns whether one authenticated connection is subscribed to a match.
-    #[must_use]
-    pub fn is_subscribed(&self, connection: ConnectionId, match_id: MatchId) -> bool {
-        self.subscriptions
-            .get(&match_id)
-            .is_some_and(|connections| connections.contains(&connection))
-    }
-}
-
-/// Live subscription authorization failure.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum SubscriptionError {
-    /// Connection has no authenticated account.
-    #[error("connection is not authenticated")]
-    Unauthenticated,
-    /// Authenticated account is not a match participant.
-    #[error("connection is not authorized for match")]
-    Unauthorized,
-}
-
 /// Snapshot publication failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SnapshotError {
@@ -277,7 +221,9 @@ pub struct Participants {
 }
 
 impl Participants {
-    const fn player_for(self, account: AccountId) -> Option<Player> {
+    /// Returns the seat occupied by `account`, if it is a participant.
+    #[must_use]
+    pub const fn player_for(self, account: AccountId) -> Option<Player> {
         if account.0 == self.player_one.0 {
             Some(Player::One)
         } else if account.0 == self.player_two.0 {
@@ -355,6 +301,8 @@ pub struct CommandAcknowledgement {
     pub duplicate: bool,
     /// Next authoritative deadline, absent after completion.
     pub deadline: Option<ScheduledDeadline>,
+    /// Fixed simulation ticks the accepted shot ran; zero for non-shot commands.
+    pub playback_ticks: u32,
 }
 
 /// Authoritative command rejection.
@@ -676,15 +624,9 @@ impl<J: CommandJournal> MatchService<J> {
             Player::One => runtime.participants.player_one,
             Player::Two => runtime.participants.player_two,
         };
-        let mut id = [0_u8; 16];
-        id[..8].copy_from_slice(&deadline.id.revision.to_be_bytes());
-        id[8] = match deadline.id.player {
-            Player::One => 1,
-            Player::Two => 2,
-        };
         let envelope = CommandEnvelope::new(
             deadline.id.revision,
-            CommandId::new(id),
+            timeout_command_id(deadline.id),
             pwmtf_game_domain::VersionedMatchCommand::new(pwmtf_game_domain::MatchCommand::Timeout),
         );
         self.apply_at(match_id, actor, envelope, now)
@@ -708,6 +650,16 @@ impl<J: CommandJournal> MatchService<J> {
         participants: Participants,
     ) -> Result<Option<u64>, RecoveryError> {
         let records = self.journal.load(match_id).await?;
+        self.restore_match(match_id, participants, records)
+    }
+
+    /// Validates and publishes already-loaded durable records for one match.
+    fn restore_match(
+        &mut self,
+        match_id: MatchId,
+        participants: Participants,
+        records: Vec<AcceptedCommand>,
+    ) -> Result<Option<u64>, RecoveryError> {
         if records.is_empty() {
             return Ok(None);
         }
@@ -751,9 +703,9 @@ impl<J: CommandJournal> MatchService<J> {
                 .map_err(|_| RecoveryError::InvalidSnapshot)?
             };
             let replayed_result = replayed
-                .apply_command(envelope.command)
+                .apply_command_timed(envelope.command)
                 .map_err(|_| RecoveryError::ReplayMismatch)?;
-            if replayed_result != record.result || replayed != restored {
+            if replayed_result.result != record.result || replayed != restored {
                 return Err(RecoveryError::ReplayMismatch);
             }
             if restored.checksum() != record.checksum {
@@ -765,6 +717,7 @@ impl<J: CommandJournal> MatchService<J> {
                 result: record.result.clone(),
                 duplicate: false,
                 deadline: record.deadline,
+                playback_ticks: replayed_result.playback_ticks,
             };
             accepted.insert(
                 record.command_id,
@@ -811,7 +764,9 @@ impl<J: CommandJournal> MatchService<J> {
             .await
     }
 
-    /// Applies a command and schedules the next turn deadline from authoritative time.
+    /// Applies a command and schedules the next turn deadline from authoritative
+    /// time. The next turn starts after the accepted shot's authoritative
+    /// playback, so the deadline is `now + playback + turn duration`.
     ///
     /// # Errors
     ///
@@ -819,6 +774,7 @@ impl<J: CommandJournal> MatchService<J> {
     /// stale revisions, conflicting idempotency reuse, domain rejection, or a
     /// journal failure. Journal failure leaves in-memory canonical state and
     /// revision unchanged.
+    #[allow(clippy::too_many_lines)]
     pub async fn apply_at(
         &mut self,
         match_id: MatchId,
@@ -869,8 +825,11 @@ impl<J: CommandJournal> MatchService<J> {
         }
 
         let mut candidate = runtime.state.clone();
-        let result = candidate
-            .apply_command(envelope.command)
+        let pwmtf_game_domain::AppliedCommand {
+            result,
+            playback_ticks,
+        } = candidate
+            .apply_command_timed(envelope.command)
             .map_err(|_| CommandError::Domain)?;
         let revision = runtime
             .revision
@@ -886,7 +845,12 @@ impl<J: CommandJournal> MatchService<J> {
                     revision,
                     player: candidate.active_player(),
                 },
-                due_at: DeadlineMillis::after_turn(now, candidate.rules()),
+                due_at: DeadlineMillis::after_playback_and_turn(
+                    now,
+                    candidate.physics(),
+                    playback_ticks,
+                    candidate.rules(),
+                ),
             })
         } else {
             None
@@ -897,6 +861,7 @@ impl<J: CommandJournal> MatchService<J> {
             result: result.clone(),
             duplicate: false,
             deadline,
+            playback_ticks,
         };
         self.journal
             .commit(AcceptedCommand {
@@ -924,6 +889,37 @@ impl<J: CommandJournal> MatchService<J> {
         );
         Ok(acknowledgement)
     }
+}
+
+/// Deterministic idempotency key of the synthetic timeout for one deadline.
+///
+/// Recovery and retried scheduler polls derive the same key, so a timeout is
+/// accepted at most once per deadline identity.
+#[must_use]
+pub const fn timeout_command_id(deadline: DeadlineId) -> CommandId {
+    let mut id = [0_u8; 16];
+    let revision = deadline.revision.to_be_bytes();
+    let mut index = 0;
+    while index < revision.len() {
+        id[index] = revision[index];
+        index += 1;
+    }
+    id[8] = match deadline.player {
+        Player::One => 1,
+        Player::Two => 2,
+    };
+    CommandId::new(id)
+}
+
+/// Returns whether a command identifier lies in the reserved namespace of
+/// [`timeout_command_id`] (byte 8 names a seat and bytes 9..16 are zero).
+///
+/// Live client commands carrying such an identifier are refused so a client
+/// cannot pre-empt a future synthetic timeout's idempotency key.
+#[must_use]
+pub fn is_timeout_command_id(command_id: CommandId) -> bool {
+    let bytes = command_id.bytes();
+    matches!(bytes[8], 1 | 2) && bytes[9..].iter().all(|byte| *byte == 0)
 }
 
 const fn command_requires_active_player(command: pwmtf_game_domain::MatchCommand) -> bool {
@@ -1044,46 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn subscriptions_require_authenticated_participants_and_allow_multiple_connections() {
-        block_on(async {
-            let participants = Participants {
-                player_one: AccountId::new(1),
-                player_two: AccountId::new(2),
-            };
-            let mut registry = SubscriptionRegistry::default();
-            assert_eq!(
-                registry.subscribe(ConnectionId::new(1), MatchId::new(9), participants),
-                Err(SubscriptionError::Unauthenticated)
-            );
-            registry.connect(ConnectionId::new(1), AccountId::new(1));
-            registry.connect(ConnectionId::new(2), AccountId::new(1));
-            registry.connect(ConnectionId::new(3), AccountId::new(3));
-            registry
-                .subscribe(ConnectionId::new(1), MatchId::new(9), participants)
-                .unwrap();
-            registry
-                .subscribe(ConnectionId::new(2), MatchId::new(9), participants)
-                .unwrap();
-            assert_eq!(
-                registry.subscribe(ConnectionId::new(3), MatchId::new(9), participants),
-                Err(SubscriptionError::Unauthorized)
-            );
-            assert_eq!(
-                registry.subscribers(MatchId::new(9)),
-                vec![ConnectionId::new(1), ConnectionId::new(2)]
-            );
-            assert!(registry.is_subscribed(ConnectionId::new(1), MatchId::new(9)));
-            assert!(!registry.is_subscribed(ConnectionId::new(3), MatchId::new(9)));
-            registry.disconnect(ConnectionId::new(1));
-            assert!(!registry.is_subscribed(ConnectionId::new(1), MatchId::new(9)));
-            assert_eq!(
-                registry.subscribers(MatchId::new(9)),
-                vec![ConnectionId::new(2)]
-            );
-        });
-    }
-
-    #[test]
     fn scheduler_polls_all_due_matches_in_stable_order() {
         block_on(async {
             let mut service = service();
@@ -1142,6 +1098,105 @@ mod tests {
             assert_eq!(service.match_state(MatchId::new(9)).unwrap().0, 2);
             assert_eq!(service.match_state(MatchId::new(10)).unwrap().0, 2);
         });
+    }
+
+    #[test]
+    fn shot_deadline_starts_after_authoritative_playback() {
+        block_on(async {
+            let mut service = service();
+            let shot = envelope(
+                0,
+                30,
+                MatchCommand::PlayShot {
+                    shot: pwmtf_game_domain::VersionedShotCommand::new(
+                        pwmtf_game_domain::Aim::new(0).unwrap(),
+                        pwmtf_game_domain::ShotPower::new(pwmtf_game_domain::ShotPower::MAX)
+                            .unwrap(),
+                        pwmtf_game_domain::Spin::CENTER,
+                    ),
+                    called_pocket: None,
+                },
+            );
+            let acknowledgement = service
+                .apply_at(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    shot,
+                    DeadlineMillis::new(1_000),
+                )
+                .await
+                .unwrap();
+            assert!(acknowledgement.playback_ticks > 0);
+            let playback =
+                PhysicsProfile::standard().playback_millis(acknowledgement.playback_ticks);
+            assert!(playback > 0);
+            assert_eq!(
+                acknowledgement.deadline.unwrap().due_at.value(),
+                1_000 + playback + RulesProfile::standard().turn_duration_millis()
+            );
+            assert_eq!(
+                service.journal.records[0].deadline,
+                acknowledgement.deadline
+            );
+            let duplicate = service
+                .apply_at(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    shot,
+                    DeadlineMillis::new(9_000),
+                )
+                .await
+                .unwrap();
+            assert!(duplicate.duplicate);
+            assert_eq!(duplicate.deadline, acknowledgement.deadline);
+            let mut recovered = MatchService::new(MemoryJournal {
+                records: service.journal.records.clone(),
+                fail: false,
+            });
+            recovered
+                .recover_match(
+                    MatchId::new(9),
+                    Participants {
+                        player_one: AccountId::new(1),
+                        player_two: AccountId::new(2),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.deadline(MatchId::new(9)),
+                acknowledgement.deadline
+            );
+        });
+    }
+
+    #[test]
+    fn timeout_command_ids_are_deterministic_per_deadline() {
+        let id = timeout_command_id(DeadlineId {
+            revision: 0x0102,
+            player: Player::Two,
+        });
+        let mut expected = [0_u8; 16];
+        expected[6] = 1;
+        expected[7] = 2;
+        expected[8] = 2;
+        assert_eq!(id, CommandId::new(expected));
+    }
+
+    #[test]
+    fn reserved_timeout_namespace_covers_every_synthetic_timeout_id() {
+        for revision in [0, 1, u64::MAX] {
+            for player in [Player::One, Player::Two] {
+                assert!(is_timeout_command_id(timeout_command_id(DeadlineId {
+                    revision,
+                    player
+                })));
+            }
+        }
+        assert!(!is_timeout_command_id(CommandId::new([7; 16])));
+        let mut seatless = [0_u8; 16];
+        seatless[8] = 3;
+        assert!(!is_timeout_command_id(CommandId::new(seatless)));
     }
 
     #[test]

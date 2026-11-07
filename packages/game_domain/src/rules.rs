@@ -245,6 +245,16 @@ impl VersionedMatchCommand {
     }
 }
 
+/// Authoritative command result plus its deterministic shot playback length.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppliedCommand {
+    /// Canonical command result, unchanged from [`MatchState::apply_command`].
+    pub result: MatchCommandResult,
+    /// Fixed physics ticks the shot simulation ran; zero for non-shot commands
+    /// and zero-power shots.
+    pub playback_ticks: u32,
+}
+
 /// Result emitted by replaying a match command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MatchCommandResult {
@@ -716,17 +726,29 @@ impl MatchState {
     ///
     /// Returns [`MatchError::Completed`] after completion, or
     /// [`MatchError::Simulation`] when canonical simulation rejects the shot.
-    #[allow(clippy::too_many_lines)]
     pub fn play_shot(
         &mut self,
         command: VersionedShotCommand,
         called_pocket: Option<PocketId>,
     ) -> Result<ShotResolution, MatchError> {
+        self.play_shot_timed(command, called_pocket)
+            .map(|(resolution, _)| resolution)
+    }
+
+    /// Plays a shot and also returns the fixed ticks its simulation ran.
+    #[allow(clippy::too_many_lines)]
+    fn play_shot_timed(
+        &mut self,
+        command: VersionedShotCommand,
+        called_pocket: Option<PocketId>,
+    ) -> Result<(ShotResolution, u32), MatchError> {
         if !matches!(self.status, MatchStatus::InProgress) {
             return Err(MatchError::Completed);
         }
         let before = self.table.clone();
         let result = simulate_shot(self.geometry, self.physics, before.clone(), command)?;
+        // Measured before any rerack replaces the table with a fresh rack.
+        let playback_ticks = result.state.tick().saturating_sub(before.tick());
         let shooter = self.active_player;
         let on_break = self.break_pending;
         let first_contact = result.events.iter().find_map(|event| match event.kind {
@@ -791,15 +813,18 @@ impl MatchState {
             )?;
             self.break_pending = true;
             self.ball_in_hand = false;
-            return Ok(ShotResolution {
-                shooter,
-                fouls,
-                assigned_group: None,
-                reracked: true,
-                status: self.status,
-                next_player: Some(self.active_player),
-                ball_in_hand: false,
-            });
+            return Ok((
+                ShotResolution {
+                    shooter,
+                    fouls,
+                    assigned_group: None,
+                    reracked: true,
+                    status: self.status,
+                    next_player: Some(self.active_player),
+                    ball_in_hand: false,
+                },
+                playback_ticks,
+            ));
         }
 
         self.table = result.state;
@@ -818,15 +843,18 @@ impl MatchState {
             };
             self.status = MatchStatus::Completed(outcome);
             self.ball_in_hand = false;
-            return Ok(ShotResolution {
-                shooter,
-                fouls,
-                assigned_group: None,
-                reracked: false,
-                status: self.status,
-                next_player: None,
-                ball_in_hand: false,
-            });
+            return Ok((
+                ShotResolution {
+                    shooter,
+                    fouls,
+                    assigned_group: None,
+                    reracked: false,
+                    status: self.status,
+                    next_player: None,
+                    ball_in_hand: false,
+                },
+                playback_ticks,
+            ));
         }
 
         let assigned_group = if !on_break && fouls.is_empty() && self.player_one_group.is_none() {
@@ -851,15 +879,18 @@ impl MatchState {
             self.active_player = shooter.opponent();
         }
         self.ball_in_hand = !fouls.is_empty();
-        Ok(ShotResolution {
-            shooter,
-            fouls,
-            assigned_group,
-            reracked: false,
-            status: self.status,
-            next_player: Some(self.active_player),
-            ball_in_hand: self.ball_in_hand,
-        })
+        Ok((
+            ShotResolution {
+                shooter,
+                fouls,
+                assigned_group,
+                reracked: false,
+                status: self.status,
+                next_player: Some(self.active_player),
+                ball_in_hand: self.ball_in_hand,
+            },
+            playback_ticks,
+        ))
     }
 
     /// Applies the authoritative turn-timeout transition exactly once at the
@@ -937,25 +968,52 @@ impl MatchState {
         &mut self,
         command: VersionedMatchCommand,
     ) -> Result<MatchCommandResult, MatchError> {
+        self.apply_command_timed(command)
+            .map(|applied| applied.result)
+    }
+
+    /// Applies one explicitly versioned canonical match command and reports
+    /// how many fixed physics ticks of shot playback the transition spans.
+    ///
+    /// The resulting state and [`MatchCommandResult`] are identical to
+    /// [`Self::apply_command`]. `playback_ticks` is zero for non-shot
+    /// commands and zero-power shots; for an 8-ball-on-break rerack it is the
+    /// simulated shot's duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MatchError::UnsupportedCommandVersion`] for an unknown
+    /// envelope, or the relevant aggregate transition error.
+    pub fn apply_command_timed(
+        &mut self,
+        command: VersionedMatchCommand,
+    ) -> Result<AppliedCommand, MatchError> {
         if command.version != MATCH_COMMAND_VERSION {
             return Err(MatchError::UnsupportedCommandVersion(command.version));
         }
+        let untimed = |result| AppliedCommand {
+            result,
+            playback_ticks: 0,
+        };
         match command.command {
             MatchCommand::PlayShot {
                 shot,
                 called_pocket,
             } => self
-                .play_shot(shot, called_pocket)
-                .map(MatchCommandResult::Shot),
+                .play_shot_timed(shot, called_pocket)
+                .map(|(resolution, playback_ticks)| AppliedCommand {
+                    result: MatchCommandResult::Shot(resolution),
+                    playback_ticks,
+                }),
             MatchCommand::Timeout => self
                 .timeout_turn()
-                .map(|active_player| MatchCommandResult::Timeout { active_player }),
-            MatchCommand::Concede { player } => {
-                self.concede(player).map(MatchCommandResult::Conceded)
-            }
+                .map(|active_player| untimed(MatchCommandResult::Timeout { active_player })),
+            MatchCommand::Concede { player } => self
+                .concede(player)
+                .map(|outcome| untimed(MatchCommandResult::Conceded(outcome))),
             MatchCommand::PlaceCueBall { position } => {
                 self.place_cue_ball(position)?;
-                Ok(MatchCommandResult::CueBallPlaced)
+                Ok(untimed(MatchCommandResult::CueBallPlaced))
             }
         }
     }
@@ -1663,6 +1721,102 @@ mod tests {
         assert_eq!(result.next_player, Some(Player::Two));
         assert!(result.ball_in_hand);
         assert_eq!(game.status(), MatchStatus::InProgress);
+    }
+
+    #[test]
+    fn timed_break_reports_playback_ticks_and_matches_untimed_application() {
+        let shot = VersionedMatchCommand::new(MatchCommand::PlayShot {
+            shot: command(0, 3_000),
+            called_pocket: None,
+        });
+        let mut timed = match_state();
+        let mut untimed = match_state();
+        let start_tick = timed.table().tick();
+        let applied = timed.apply_command_timed(shot).unwrap();
+        let result = untimed.apply_command(shot).unwrap();
+        assert!(applied.playback_ticks > 0);
+        assert_eq!(
+            applied.playback_ticks,
+            timed.table().tick() - start_tick,
+            "playback spans exactly the simulated ticks"
+        );
+        assert_eq!(applied.result, result);
+        assert_eq!(timed, untimed);
+        assert_eq!(timed.checksum(), untimed.checksum());
+    }
+
+    #[test]
+    fn timed_rerack_reports_the_simulated_shot_ticks() {
+        let mut game = match_state();
+        game.table = side_pocket_state(8);
+        let before_tick = game.table.tick();
+        let shot = command(2_500, 3_000);
+        let expected = simulate_shot(game.geometry, game.physics, game.table.clone(), shot)
+            .unwrap()
+            .state
+            .tick()
+            - before_tick;
+        let applied = game
+            .apply_command_timed(VersionedMatchCommand::new(MatchCommand::PlayShot {
+                shot,
+                called_pocket: None,
+            }))
+            .unwrap();
+        assert!(matches!(
+            &applied.result,
+            MatchCommandResult::Shot(resolution) if resolution.reracked
+        ));
+        assert!(expected > 0);
+        assert_eq!(applied.playback_ticks, expected);
+    }
+
+    #[test]
+    fn timed_non_shot_and_zero_power_commands_have_no_playback() {
+        let mut timed = match_state();
+        let mut untimed = match_state();
+        let commands = [
+            VersionedMatchCommand::new(MatchCommand::PlayShot {
+                shot: command(0, 0),
+                called_pocket: None,
+            }),
+            VersionedMatchCommand::new(MatchCommand::PlaceCueBall {
+                position: crate::Vector::from_micros(-600_000, 100_000),
+            }),
+            VersionedMatchCommand::new(MatchCommand::Timeout),
+            VersionedMatchCommand::new(MatchCommand::Concede {
+                player: Player::One,
+            }),
+        ];
+        for command in commands {
+            let applied = timed.apply_command_timed(command).unwrap();
+            assert_eq!(applied.playback_ticks, 0);
+            assert_eq!(Ok(applied.result), untimed.apply_command(command));
+            assert_eq!(timed, untimed);
+        }
+        let unknown = VersionedMatchCommand {
+            version: MATCH_COMMAND_VERSION + 1,
+            command: MatchCommand::Timeout,
+        };
+        assert_eq!(
+            timed.apply_command_timed(unknown),
+            Err(MatchError::UnsupportedCommandVersion(
+                MATCH_COMMAND_VERSION + 1
+            ))
+        );
+    }
+
+    #[test]
+    fn playback_millis_rounds_up_whole_milliseconds() {
+        let physics = PhysicsProfile::standard();
+        assert_eq!(physics.ticks_per_second(), 240);
+        assert_eq!(crate::playback_millis(physics, 0), 0);
+        assert_eq!(crate::playback_millis(physics, 1), 5);
+        assert_eq!(crate::playback_millis(physics, 240), 1_000);
+        assert_eq!(physics.playback_millis(241), 1_005);
+        assert_eq!(
+            physics.playback_millis(u32::MAX),
+            (u64::from(u32::MAX) * 1_000).div_ceil(240)
+        );
     }
 
     #[test]

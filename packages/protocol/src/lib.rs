@@ -9,6 +9,13 @@ use pwmtf_game_domain::{
 };
 use thiserror::Error;
 
+mod session;
+
+pub use session::{
+    ClientMessage, LastCommand, MAX_CLIENT_MESSAGE_BYTES, MAX_SERVER_MESSAGE_BYTES,
+    MatchStateMessage, RejectReason, SESSION_VERSION, ServerMessage, SubscriptionKind,
+};
+
 /// Current transport protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Ephemeral preview payload version, independent of durable command negotiation.
@@ -316,11 +323,14 @@ pub enum ProtocolError {
     #[error("invalid shot preview")]
     InvalidPreview,
     /// Frame exceeds the fixed wire bound.
-    #[error("frame size {0} exceeds {MAX_FRAME_BYTES} bytes")]
+    #[error("frame or payload size {0} exceeds its fixed bound")]
     FrameTooLarge(usize),
     /// A version offer exceeds the negotiation bound.
     #[error("protocol version offer exceeds the fixed bound")]
     TooManyVersions,
+    /// A version offer contains no versions.
+    #[error("protocol version offer is empty")]
+    EmptyVersionOffer,
     /// Client and server share no supported version.
     #[error("no compatible protocol version")]
     NoCompatibleVersion,
@@ -486,6 +496,9 @@ impl<'a> Reader<'a> {
     }
     fn u64(&mut self) -> Result<u64, ProtocolError> {
         Ok(u64::from_be_bytes(self.array()?))
+    }
+    fn u128(&mut self) -> Result<u128, ProtocolError> {
+        Ok(u128::from_be_bytes(self.array()?))
     }
     fn u32(&mut self) -> Result<u32, ProtocolError> {
         Ok(u32::from_be_bytes(self.array()?))

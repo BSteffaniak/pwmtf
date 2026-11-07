@@ -10,6 +10,7 @@ mod aim_preview;
 mod ball_art;
 mod cue_art;
 mod exact_preview;
+pub mod playback;
 pub mod prediction;
 mod sandbox;
 pub mod transport;
@@ -104,6 +105,9 @@ struct CanonicalPresentation {
     status: Option<String>,
     active_player: Option<pwmtf_game_domain::Player>,
     completed: bool,
+    /// Place balls exactly at `target` this frame instead of easing toward it:
+    /// set while a shot plays back and on the frame playback ends or resets.
+    snap: bool,
 }
 
 #[derive(Resource)]
@@ -238,19 +242,78 @@ fn presentation_tier() -> &'static str {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-/// Connects the browser to an authorized same-origin match subscription.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception when socket construction fails.
-pub fn connect_match_socket(url: &str) -> Result<(), wasm_bindgen::JsValue> {
-    browser_transport::connect(url)
+/// Starts the single same-origin `/ws` session socket; it reconnects itself.
+pub fn session_start() {
+    let now = browser_transport::monotonic_millis();
+    browser_transport::with_mut(|transport| transport.start(now));
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn disconnect_match_socket() {
-    browser_transport::disconnect();
+/// Pauses (closing the socket) or resumes (reconnecting immediately) the
+/// session on page visibility and online/offline changes.
+pub fn session_set_active(active: bool) {
+    let now = browser_transport::monotonic_millis();
+    browser_transport::with_mut(|transport| transport.set_active(active, now));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Registers `callback(name, detailJson)` for session events and replays the
+/// current `connection`/`match` state to it.
+pub fn set_session_listener(callback: js_sys::Function) {
+    browser_transport::set_listener(callback);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_id(value: &str) -> Result<u128, wasm_bindgen::JsValue> {
+    if value.is_empty() || value.len() > 39 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(wasm_bindgen::JsValue::from_str("invalid identifier"));
+    }
+    value
+        .parse::<u128>()
+        .map_err(|_| wasm_bindgen::JsValue::from_str("invalid identifier"))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Subscribes to one match by decimal id. Disables the practice sandbox and
+/// resets match presentation.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception unless `match_id` is a decimal `u128`.
+pub fn subscribe_match(match_id: &str) -> Result<(), wasm_bindgen::JsValue> {
+    let match_id = parse_id(match_id)?;
+    browser_transport::with_mut(|transport| transport.subscribe_match(match_id));
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Drops the current match subscription.
+pub fn unsubscribe_match() {
+    browser_transport::with_mut(transport::SessionTransport::unsubscribe_match);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Subscribes to one lobby by decimal id; this is lobby presence.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception unless `lobby_id` is a decimal `u128`.
+pub fn subscribe_lobby(lobby_id: &str) -> Result<(), wasm_bindgen::JsValue> {
+    let lobby_id = parse_id(lobby_id)?;
+    browser_transport::with_mut(|transport| transport.subscribe_lobby(lobby_id));
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Drops the current lobby subscription (leaves lobby presence).
+pub fn unsubscribe_lobby() {
+    browser_transport::with_mut(transport::SessionTransport::unsubscribe_lobby);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -263,31 +326,7 @@ pub fn interrupt_match_gesture() {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-/// Returns whether the match socket completed negotiation and initialization.
-#[must_use]
-pub fn match_socket_ready() -> bool {
-    browser_transport::is_ready()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns whether the current socket failed and needs a reconnect attempt.
-#[must_use]
-pub fn match_socket_needs_reconnect() -> bool {
-    browser_transport::needs_reconnect()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns the retry delay selected by the transport lifecycle.
-#[must_use]
-pub fn match_socket_retry_delay_ms() -> u64 {
-    browser_transport::retry_delay_ms()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns the current authoritative/predicted revision for presentation.
+/// Returns the current authoritative revision (debug/test getter).
 #[must_use]
 pub fn match_revision() -> Option<u64> {
     browser_transport::authoritative_revision()
@@ -295,93 +334,7 @@ pub fn match_revision() -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-/// Returns whether local presentation awaits authority for one predicted command.
-#[must_use]
-pub fn match_has_pending_prediction() -> bool {
-    browser_transport::has_pending_prediction()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Sets the authenticated participant seat used only to gate local input.
-///
-/// # Errors
-///
-/// Returns a JavaScript exception unless `player` is one or two.
-pub fn set_match_player(player: u8) -> Result<(), wasm_bindgen::JsValue> {
-    let player = match player {
-        1 => pwmtf_game_domain::Player::One,
-        2 => pwmtf_game_domain::Player::Two,
-        _ => return Err(wasm_bindgen::JsValue::from_str("invalid participant seat")),
-    };
-    browser_transport::set_local_player(player);
-    Ok(())
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns whether the local participant may submit active-player commands.
-#[must_use]
-pub fn match_accepts_active_player_command() -> bool {
-    browser_transport::accepts_active_player_command()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns and clears whether authority rejected the latest gameplay command.
-#[must_use]
-pub fn match_command_rejected() -> bool {
-    browser_transport::take_command_rejected()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns whether the authoritative match accepts gameplay commands.
-#[must_use]
-pub fn match_accepts_gameplay_commands() -> bool {
-    browser_transport::accepts_gameplay_commands()
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns the authoritative active player, or zero after match completion.
-#[must_use]
-pub fn match_active_player() -> u8 {
-    browser_transport::authoritative_match_info().map_or(0, |(player, outcome)| {
-        outcome.map_or_else(|| player_number(player), |_| 0)
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns the authoritative winner, or zero while the match is active.
-#[must_use]
-pub fn match_winner() -> u8 {
-    browser_transport::authoritative_match_info()
-        .and_then(|(_, outcome)| outcome)
-        .map_or(0, |outcome| player_number(outcome.winner))
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns the stable authoritative completion-reason label, or an empty string.
-#[must_use]
-pub fn match_completion_reason() -> String {
-    browser_transport::authoritative_match_info()
-        .and_then(|(_, outcome)| outcome)
-        .map_or_else(String::new, |outcome| {
-            match outcome.reason {
-                pwmtf_game_domain::CompletionReason::LegalEightBall => "legal-eight-ball",
-                pwmtf_game_domain::CompletionReason::IllegalEightBall => "illegal-eight-ball",
-                pwmtf_game_domain::CompletionReason::Concession => "concession",
-            }
-            .to_owned()
-        })
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-/// Returns the current canonical predicted checksum for presentation effects.
+/// Returns the current canonical predicted checksum (debug/test getter).
 #[must_use]
 pub fn match_checksum() -> Option<u64> {
     browser_transport::predicted_checksum()
@@ -396,7 +349,7 @@ pub fn match_checksum() -> Option<u64> {
 /// Returns a JavaScript exception unless the socket is ready, prediction is
 /// valid, secure identifier generation succeeds, and transmission succeeds.
 pub fn send_cue_ball_placement(x_micros: i64, y_micros: i64) -> Result<(), wasm_bindgen::JsValue> {
-    browser_transport::predict_and_send_cue_ball_placement(
+    browser_transport::submit_cue_ball_placement(
         random_command_id()?,
         pwmtf_game_domain::Vector::from_micros(x_micros, y_micros),
     )
@@ -424,7 +377,7 @@ pub fn send_shot_command(
     let spin = pwmtf_game_domain::Spin::new(spin_side, spin_vertical)
         .map_err(|_| wasm_bindgen::JsValue::from_str("invalid spin"))?;
     let called_pocket = decode_called_pocket(called_pocket)?;
-    browser_transport::predict_and_send_shot(
+    browser_transport::submit_shot(
         random_command_id()?,
         pwmtf_game_domain::VersionedShotCommand::new(aim, power, spin),
         called_pocket,
@@ -433,19 +386,20 @@ pub fn send_shot_command(
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-/// Predicts and sends an explicit concession for the authenticated participant seat.
+/// Predicts and sends an explicit concession for the local participant seat.
 ///
 /// # Errors
 ///
-/// Returns a JavaScript exception unless the socket is initialized, identifier
-/// generation succeeds, prediction is valid, and transmission succeeds.
+/// Returns a JavaScript exception for an invalid seat, a seat other than the
+/// server-reported local one, an unready session, a pending command, or
+/// identifier generation failure.
 pub fn send_concession(player: u8) -> Result<(), wasm_bindgen::JsValue> {
     let player = match player {
         1 => pwmtf_game_domain::Player::One,
         2 => pwmtf_game_domain::Player::Two,
         _ => return Err(wasm_bindgen::JsValue::from_str("invalid player seat")),
     };
-    browser_transport::predict_and_send_concession(random_command_id()?, player)
+    browser_transport::submit_concession(random_command_id()?, player)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -738,11 +692,17 @@ fn spawn_rectangle(commands: &mut Commands, size: Vec2, color: Color, translatio
 
 #[allow(clippy::cast_precision_loss)]
 fn canonical_to_world(position: pwmtf_game_domain::Vector) -> Vec2 {
+    micros_to_world(position.x.micros() as f64, position.y.micros() as f64)
+}
+
+/// Maps sub-tick interpolated canonical micro-metres to world coordinates.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn micros_to_world(x_micros: f64, y_micros: f64) -> Vec2 {
     let geometry = pwmtf_game_domain::TableGeometry::standard();
     Vec2::new(
-        (position.x.micros() as f32 / geometry.half_width().micros() as f32)
+        ((x_micros / geometry.half_width().micros() as f64) as f32)
             .mul_add(TABLE_SIZE.x / 2.0, TABLE_CENTER_X),
-        position.y.micros() as f32 / geometry.half_height().micros() as f32 * (TABLE_SIZE.y / 2.0),
+        (y_micros / geometry.half_height().micros() as f64) as f32 * (TABLE_SIZE.y / 2.0),
     )
 }
 
@@ -786,35 +746,80 @@ impl CanonicalPresentation {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl CanonicalPresentation {
+    /// Shows a running shot playback directly: positions are the playback's
+    /// fixed-tick samples, and a ball disappears on the tick it is pocketed.
+    fn project_playback(&mut self, playback: &playback::ShotPlayback) {
+        self.checksum = None;
+        self.target.clear();
+        self.pocketed.clear();
+        for ball in playback.samples() {
+            if ball.pocketed {
+                self.pocketed.insert(ball.number);
+            } else {
+                self.target
+                    .insert(ball.number, micros_to_world(ball.x_micros, ball.y_micros));
+            }
+        }
+        self.snap = true;
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 #[cfg(target_arch = "wasm32")]
-fn synchronize_canonical_presentation(mut presentation: ResMut<CanonicalPresentation>) {
-    let Some(checksum) = browser_transport::predicted_checksum() else {
-        return;
-    };
-    if presentation.checksum == Some(checksum) {
-        return;
+fn synchronize_canonical_presentation(
+    mut presentation: ResMut<CanonicalPresentation>,
+    mut sandbox: ResMut<sandbox::Sandbox>,
+    mut epoch: Local<Option<u64>>,
+) {
+    let ended = browser_transport::advance_playback();
+    if presentation.snap {
+        presentation.snap = false;
     }
-    presentation.checksum = Some(checksum);
-    if let Some((active_player, outcome)) = browser_transport::authoritative_match_info() {
-        presentation.completed = outcome.is_some();
-        presentation.active_player = (!presentation.completed).then_some(active_player);
-        presentation.status = Some(match_status_text(active_player, outcome));
-    }
-    presentation.target.clear();
-    presentation.pocketed.clear();
-    for number in 0_u8..=15 {
-        let Some((position, pocketed)) = browser_transport::predicted_ball(number) else {
-            continue;
-        };
-        if pocketed {
-            presentation.pocketed.insert(number);
-        } else {
-            presentation
-                .target
-                .insert(number, canonical_to_world(position));
+    browser_transport::with(|transport| {
+        if transport.subscribed_match().is_some() && sandbox.enabled {
+            sandbox.disable();
         }
-    }
+        if sandbox.enabled {
+            return;
+        }
+        let current_epoch = transport.presentation_epoch();
+        let reset = *epoch != Some(current_epoch);
+        if reset {
+            *epoch = Some(current_epoch);
+            presentation.checksum = None;
+        }
+        if let Some(playback) = transport.playback() {
+            presentation.project_playback(playback);
+            presentation.status = Some("Balls rolling…".into());
+            return;
+        }
+        let Some(prediction) = transport.prediction() else {
+            if reset {
+                presentation.status = Some("Waiting for an authoritative match".into());
+            }
+            return;
+        };
+        let predicted = prediction.predicted();
+        if presentation.checksum != Some(predicted.checksum()) {
+            presentation.project(predicted);
+            let authority = prediction.authoritative();
+            let outcome = match authority.status() {
+                pwmtf_game_domain::MatchStatus::InProgress => None,
+                pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
+            };
+            presentation.completed = outcome.is_some();
+            presentation.active_player =
+                (!presentation.completed).then_some(authority.active_player());
+            presentation.status = Some(match_status_text(authority.active_player(), outcome));
+        }
+        // Playback end and subscription resets show authority exactly; other
+        // authoritative changes (gap, reconnect, placement, timeout) ease in.
+        if ended || reset {
+            presentation.snap = true;
+        }
+    });
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -873,7 +878,7 @@ fn interpolate_canonical_balls(
     sandbox: Res<sandbox::Sandbox>,
     mut balls: Query<(&CanonicalBall, &mut Transform, &mut Visibility)>,
 ) {
-    let blend = if sandbox.enabled {
+    let blend = if sandbox.enabled || presentation.snap {
         1.0
     } else {
         (time.delta_secs() * 18.0).clamp(0.0, 1.0)
@@ -886,7 +891,42 @@ fn interpolate_canonical_balls(
             let current = transform.translation.truncate();
             transform.translation = current.lerp(*target, blend).extend(transform.translation.z);
         }
+        #[cfg(target_arch = "wasm32")]
+        record_rendered_ball(
+            ball.0,
+            (*visibility != Visibility::Hidden).then(|| transform.translation.truncate()),
+        );
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static RENDERED_BALLS: std::cell::RefCell<[Option<Vec2>; 16]> =
+        const { std::cell::RefCell::new([None; 16]) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn record_rendered_ball(ball: u8, position: Option<Vec2>) {
+    RENDERED_BALLS.with_borrow_mut(|balls| {
+        if let Some(slot) = balls.get_mut(usize::from(ball)) {
+            *slot = position;
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns ball `ball`'s (0-15) most recently rendered world `[x, y]`
+/// (debug/test getter), or `undefined` when it is pocketed, hidden, or absent.
+#[must_use]
+pub fn match_ball_position(ball: u8) -> Option<Vec<f64>> {
+    RENDERED_BALLS.with_borrow(|balls| {
+        balls
+            .get(usize::from(ball))
+            .copied()
+            .flatten()
+            .map(|position| vec![f64::from(position.x), f64::from(position.y)])
+    })
 }
 
 fn spawn_pocket_art(

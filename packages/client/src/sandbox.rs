@@ -2,17 +2,17 @@
 use bevy::prelude::Resource;
 use pwmtf_game_domain::{
     BallId, BallState, PhysicsProfile, RackSeed, TableGeometry, Vector, VersionedShotCommand,
-    VersionedTableState, advance_tick, standard_rack, start_shot,
+    VersionedTableState, standard_rack,
 };
+
+use crate::playback::{PlaybackEnd, ShotPlayback};
 
 #[derive(Resource)]
 pub struct Sandbox {
     pub enabled: bool,
-    previous: VersionedTableState,
     pub table: VersionedTableState,
     pub moving: bool,
-    elapsed: f64,
-    ticks: u32,
+    playback: Option<ShotPlayback>,
     seed: u64,
 }
 
@@ -20,11 +20,9 @@ impl Default for Sandbox {
     fn default() -> Self {
         Self {
             enabled: practice_enabled(),
-            previous: rack(42),
             table: rack(42),
             moving: false,
-            elapsed: 0.0,
-            ticks: 0,
+            playback: None,
             seed: 42,
         }
     }
@@ -60,37 +58,44 @@ impl Sandbox {
         if !self.enabled || self.moving {
             return;
         }
-        if let Ok(table) = start_shot(PhysicsProfile::standard(), self.table.clone(), command) {
-            self.previous = table.clone();
-            self.table = table;
-            self.moving = true;
-            self.elapsed = 0.0;
-            self.ticks = 0;
+        if let Ok(playback) = ShotPlayback::start(
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            self.table.clone(),
+            command,
+            None,
+        ) {
+            self.table = playback.table().clone();
+            self.moving = !playback.is_finished();
+            self.playback = self.moving.then_some(playback);
         }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    /// Permanently disables practice once a multiplayer match is opened.
+    pub fn disable(&mut self) {
+        self.enabled = false;
+        self.moving = false;
+        self.playback = None;
     }
 
     pub fn update(&mut self, seconds: f64) {
         if !self.enabled || !self.moving {
             return;
         }
-        let profile = PhysicsProfile::standard();
-        let step = 1.0 / f64::from(profile.ticks_per_second());
-        self.elapsed += seconds.min(0.1);
-        while self.elapsed >= step && self.moving {
-            self.elapsed -= step;
-            self.ticks += 1;
-            self.previous = self.table.clone();
-            match advance_tick(TableGeometry::standard(), profile, self.table.clone()) {
-                Ok(result) => {
-                    self.table = result.state;
-                    if result.settled {
-                        self.moving = false;
-                        self.finish_rack_or_restore_cue();
-                    }
-                }
-                Err(_) => self.reset(),
-            }
-            if self.ticks >= profile.maximum_ticks() {
+        let Some(playback) = &mut self.playback else {
+            self.moving = false;
+            return;
+        };
+        let finished = playback.advance(seconds.min(0.1));
+        self.table = playback.table().clone();
+        if finished {
+            let end = playback.end();
+            self.playback = None;
+            self.moving = false;
+            if end == Some(PlaybackEnd::Settled) {
+                self.finish_rack_or_restore_cue();
+            } else {
                 self.reset();
             }
         }
@@ -101,24 +106,18 @@ impl Sandbox {
         &self,
         id: pwmtf_game_domain::BallId,
     ) -> Option<bevy::prelude::Vec2> {
-        let current = self.table.ball(id)?;
-        let target = crate::canonical_to_world(current.position);
-        if !self.moving {
-            return Some(target);
+        if let Some(playback) = &self.playback {
+            let sample = playback.sample(id)?;
+            return Some(crate::micros_to_world(sample.x_micros, sample.y_micros));
         }
-        let previous = self.previous.ball(id)?;
-        #[allow(clippy::cast_possible_truncation)]
-        let alpha = (self.elapsed * f64::from(PhysicsProfile::standard().ticks_per_second()))
-            .clamp(0.0, 1.0) as f32;
-        Some(crate::canonical_to_world(previous.position).lerp(target, alpha))
+        Some(crate::canonical_to_world(self.table.ball(id)?.position))
     }
 
     fn reset(&mut self) {
         self.seed = self.seed.wrapping_add(1);
         self.table = rack(self.seed);
-        self.previous = self.table.clone();
+        self.playback = None;
         self.moving = false;
-        self.ticks = 0;
     }
 
     fn finish_rack_or_restore_cue(&mut self) {

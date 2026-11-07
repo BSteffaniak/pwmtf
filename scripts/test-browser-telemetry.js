@@ -4,14 +4,16 @@
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const path = process.argv[2] ?? "packages/client/web/bootstrap.js";
+// Feasibility capture tooling lives in feasibility.js; match chrome in bootstrap.js.
+const path = process.argv[2] ?? "packages/client/web/feasibility.js";
 const source = fs.readFileSync(path, "utf8");
+const bootstrapSource = fs.readFileSync(process.argv[3] ?? "packages/client/web/bootstrap.js", "utf8");
 const startMarker = "function hasRequiredBackgroundIntervals(durations) {";
 const endMarker = "function externalObservations() {";
 const start = source.indexOf(startMarker);
 const end = source.indexOf(endMarker, start);
 if (start < 0 || end < 0) {
-  throw new Error("cannot locate frame sampler in bootstrap.js");
+  throw new Error("cannot locate frame sampler in feasibility.js");
 }
 
 const rafCallbacks = [];
@@ -118,7 +120,7 @@ if (
 const observationsStart = source.indexOf("function externalObservations() {");
 const observationsEnd = source.indexOf("function physicalCheckResults() {", observationsStart);
 if (observationsStart < 0 || observationsEnd < 0) {
-  throw new Error("cannot locate external observation validation in bootstrap.js");
+  throw new Error("cannot locate external observation validation in feasibility.js");
 }
 function observationInput(value) {
   return {
@@ -228,7 +230,7 @@ observationsContext.captureActive = false;
 const metadataStart = source.indexOf("function detectBrowserVersion(userAgent, family) {");
 const metadataEnd = source.indexOf("const captureLockedInputs = [", metadataStart);
 if (metadataStart < 0 || metadataEnd < 0) {
-  throw new Error("cannot locate capture metadata validation in bootstrap.js");
+  throw new Error("cannot locate capture metadata validation in feasibility.js");
 }
 
 function input(value) {
@@ -374,7 +376,7 @@ void (async () => {
   const audioStart = source.indexOf("function updateAudioControls() {");
 const audioEnd = source.indexOf("function toggleMute() {", audioStart);
 if (audioStart < 0 || audioEnd < 0) {
-  throw new Error("cannot locate audio probe lifecycle in bootstrap.js");
+  throw new Error("cannot locate audio probe lifecycle in feasibility.js");
 }
 
 function audioControl() {
@@ -632,7 +634,7 @@ while (audioContext.audioLifecycleOperations > 0) {
 const resetLifecycleStart = source.indexOf("function updateAudioControls() {");
 const resetLifecycleEnd = source.indexOf("function toggleTools() {", resetLifecycleStart);
 if (resetLifecycleStart < 0 || resetLifecycleEnd < 0) {
-  throw new Error("cannot locate audio close lifecycle in bootstrap.js");
+  throw new Error("cannot locate audio close lifecycle in feasibility.js");
 }
 const resetLifecycleContext = {
   feasibilityEnabled: false,
@@ -765,7 +767,7 @@ if (
 const muteStart = source.indexOf("function toggleMute() {");
 const muteEnd = source.indexOf("function markEvent() {", muteStart);
 if (muteStart < 0 || muteEnd < 0) {
-  throw new Error("cannot locate audio mute capture guard in bootstrap.js");
+  throw new Error("cannot locate audio mute capture guard in feasibility.js");
 }
 const muteContext = {
   masterGain: { gain: { setValueAtTime() {} } },
@@ -786,7 +788,7 @@ if (!muteContext.status.includes("active capture")) {
 const startGuardStart = source.indexOf("function startCapture() {");
 const startGuardEnd = source.indexOf("function stopCapture() {", startGuardStart);
 if (startGuardStart < 0 || startGuardEnd < 0) {
-  throw new Error("cannot locate capture-start audio-operation guard in bootstrap.js");
+  throw new Error("cannot locate capture-start audio-operation guard in feasibility.js");
 }
 const startGuardContext = {
   telemetry: { audio: { transitionFailures: 0 } },
@@ -838,7 +840,7 @@ if (!startGuardContext.status.includes("finish loading")) {
 const captureGuardStart = source.indexOf("function stopCapture() {");
 const captureGuardEnd = source.indexOf("function updateAudioControls() {", captureGuardStart);
 if (captureGuardStart < 0 || captureGuardEnd < 0) {
-  throw new Error("cannot locate capture audio-operation guard in bootstrap.js");
+  throw new Error("cannot locate capture audio-operation guard in feasibility.js");
 }
 const captureGuardContext = {
   audioProbeInFlight: false,
@@ -907,7 +909,7 @@ if (
 const resetGuardStart = source.indexOf("function resetReportForm() {");
 const resetGuardEnd = source.indexOf("function toggleTools() {", resetGuardStart);
 if (resetGuardStart < 0 || resetGuardEnd < 0) {
-  throw new Error("cannot locate report-reset audio-operation guard in bootstrap.js");
+  throw new Error("cannot locate report-reset audio-operation guard in feasibility.js");
 }
 const resetGuardContext = {
   captureActive: false,
@@ -935,7 +937,7 @@ if (!resetGuardContext.status.includes("audio operations")) {
 const markEventStart = source.indexOf("function appendVisibleCaptureEvent(");
 const markEventEnd = source.indexOf("function report(", markEventStart);
 if (markEventStart < 0 || markEventEnd < 0) {
-  throw new Error("cannot locate event-marker capture guard in bootstrap.js");
+  throw new Error("cannot locate event-marker capture guard in feasibility.js");
 }
 const markEventContext = {
   captureActive: false,
@@ -975,7 +977,7 @@ if (markEventContext.telemetry.events.length !== 0 || !markEventContext.status.i
 const captureEvidenceStart = source.indexOf("function requireCaptureEvidence() {");
 const captureEvidenceEnd = source.indexOf("function clearCaptureEvidence() {", captureEvidenceStart);
 if (captureEvidenceStart < 0 || captureEvidenceEnd < 0) {
-  throw new Error("cannot locate capture evidence validation in bootstrap.js");
+  throw new Error("cannot locate capture evidence validation in feasibility.js");
 }
 const captureEvidenceContext = {
   audioButton: { focus() {} },
@@ -1087,7 +1089,7 @@ captureEvidenceContext.telemetry.minimumFps = 60;
 const clearCaptureStart = source.indexOf("function clearCaptureEvidence() {");
 const clearCaptureEnd = source.indexOf("function feasibilityFilename(", clearCaptureStart);
 if (clearCaptureStart < 0 || clearCaptureEnd < 0) {
-  throw new Error("cannot locate capture evidence reset in bootstrap.js");
+  throw new Error("cannot locate capture evidence reset in feasibility.js");
 }
 const clearCaptureContext = {
   captureActive: true,
@@ -1175,7 +1177,7 @@ const captureControlsStart = source.indexOf("function updateCaptureControls() {"
 const stoppedCaptureStart = source.indexOf("function stoppedCaptureNeedsAudioResume() {", captureControlsStart);
 const captureControlsEnd = source.indexOf("function updateAudioControls() {", stoppedCaptureStart);
 if (captureControlsStart < 0 || stoppedCaptureStart < 0 || captureControlsEnd < 0) {
-  throw new Error("cannot locate capture control state in bootstrap.js");
+  throw new Error("cannot locate capture control state in feasibility.js");
 }
 const captureControlsContext = {
   captureActive: false,
@@ -1230,7 +1232,7 @@ if (captureControlsContext.captureButton.disabled) {
 const downloadStart = source.indexOf("function downloadReport() {");
 const downloadEnd = source.indexOf("function resetReportForm() {", downloadStart);
 if (downloadStart < 0 || downloadEnd < 0) {
-  throw new Error("cannot locate report download transaction in bootstrap.js");
+  throw new Error("cannot locate report download transaction in feasibility.js");
 }
 const downloadFunction = `${source.slice(downloadStart, downloadEnd)}\nthis.downloadReport = downloadReport;`;
 function runDownloadScenario({
@@ -1430,394 +1432,254 @@ if (lifecycleOrder.join(",") !== "first-start,first-end,second") {
   throw new Error(`audio lifecycle transitions overlapped: ${lifecycleOrder.join(",")}`);
 }
 
-const accessStart = source.indexOf("function applyMatchAccess(access,");
-const accessEnd = source.indexOf("function completionReasonText", accessStart);
-if (accessStart < 0 || accessEnd < 0) {
-  throw new Error("cannot locate match access projection in bootstrap.js");
+// Match chrome is driven only by WASM session events; it never polls or
+// fetches match access, and its turn timer is local arithmetic.
+const chromeStart = bootstrapSource.indexOf("let signedIn = false;");
+const chromeEnd = bootstrapSource.indexOf("function renderLobbyList(lobbies) {", chromeStart);
+if (chromeStart < 0 || chromeEnd < 0) {
+  throw new Error("cannot locate match session chrome in bootstrap.js");
 }
-const accessContext = {
-  Number,
-  Date: { now: () => 1_000 },
-  turnTimer: {
-    hidden: true,
-    textContent: "",
-    dataset: {},
-    removeAttribute(name) {
-      if (name === "data-expired") delete this.dataset.expired;
-    },
+const chromeSource = bootstrapSource.slice(chromeStart, chromeEnd);
+for (const forbidden of ["apiRequest(", "fetch(", "/api/matches/", "setTimeout("]) {
+  if (chromeSource.includes(forbidden)) {
+    throw new Error(`match session chrome must not use ${forbidden}`);
+  }
+}
+const chromeListeners = new Map();
+const chromeCalls = [];
+const chromeIntervals = new Map();
+let nextChromeInterval = 1;
+const chromeElement = (extra = {}) => ({
+  hidden: true,
+  disabled: false,
+  textContent: "",
+  dataset: {},
+  removeAttribute(name) {
+    delete this.dataset[name.replace(/^data-/u, "").replace(/-([a-z])/gu, (_, letter) => letter.toUpperCase())];
   },
-  matchPlayerSeat: null,
-  matchDeadlineAtMs: null,
-  matchDeadlineRevision: null,
-  matchServerTimeOffsetMs: 0,
-  matchServerTimeRequestStartedAt: 0,
-  matchServerTimeUncertaintyMs: 0,
-  matchAccessRevision: null,
-  matchAccessRefreshInFlight: false,
-  matchAccessRefreshPendingRevision: null,
-  apiRequest: async () => {
-    throw new Error("unexpected match access request");
+  addEventListener(name, listener) {
+    chromeListeners.set(`element:${name}`, listener);
   },
-  console: { error() {} },
-  wasmModule: {
-    set_match_player(player) {
-      accessContext.wasmPlayer = player;
-    },
-  },
-  wasmPlayer: null,
-};
-vm.createContext(accessContext);
-vm.runInContext(
-  `${source.slice(accessStart, accessEnd)}\nthis.applyMatchAccess = applyMatchAccess; this.refreshMatchAccess = refreshMatchAccess;`,
-  accessContext,
-);
-if (
-  !accessContext.applyMatchAccess(
-    {
-      player: 1,
-      revision: 4,
-      active_player: 1,
-      completed: false,
-      deadline_at_ms: 6_000,
-      server_time_ms: 2_000,
-    },
-    900,
-    1_100,
-  ) ||
-  accessContext.matchAccessRevision !== 4 ||
-  accessContext.matchServerTimeUncertaintyMs !== 100 ||
-  accessContext.wasmPlayer !== 1 ||
-  accessContext.turnTimer.textContent !== "5s"
-) {
-  throw new Error("match access did not project the latency-adjusted authoritative deadline");
-}
-accessContext.applyMatchAccess(
-  {
-    player: 1,
-    revision: 4,
-    active_player: 1,
-    completed: false,
-    deadline_at_ms: 6_000,
-    server_time_ms: 2_100,
-  },
-  700,
-  1_200,
-);
-if (
-  accessContext.matchServerTimeOffsetMs !== 1_000 ||
-  accessContext.matchServerTimeRequestStartedAt !== 900 ||
-  accessContext.matchServerTimeUncertaintyMs !== 100
-) {
-  throw new Error("older match timing response overwrote the newest server clock sample");
-}
-let rejectedTimingSample = false;
-try {
-  accessContext.applyMatchAccess(
-    {
-      player: 1,
-      revision: 4,
-      active_player: 1,
-      completed: false,
-      deadline_at_ms: 6_000,
-      server_time_ms: 2_000,
-    },
-    1_100,
-    1_000,
-  );
-} catch {
-  rejectedTimingSample = true;
-}
-if (!rejectedTimingSample) {
-  throw new Error("match access accepted an invalid request timing sample");
-}
-if (
-  accessContext.applyMatchAccess({
-    player: 2,
-    revision: 3,
-    active_player: 2,
-    completed: false,
-    deadline_at_ms: 9_000,
-    server_time_ms: 2_000,
-  }) ||
-  accessContext.matchPlayerSeat !== 1 ||
-  accessContext.matchAccessRevision !== 4
-) {
-  throw new Error("stale match access overwrote newer authoritative presentation");
-}
-let rejectedTerminalDeadline = false;
-try {
-  accessContext.applyMatchAccess({
-    player: 1,
-    revision: 5,
-    active_player: 0,
-    completed: true,
-    deadline_at_ms: 10_000,
-    server_time_ms: 2_000,
-  });
-} catch {
-  rejectedTerminalDeadline = true;
-}
-if (!rejectedTerminalDeadline) {
-  throw new Error("terminal match access accepted an authoritative deadline");
-}
-
-const refreshResponses = [];
-let resolveFirstRefresh;
-accessContext.apiRequest = async () =>
-  new Promise((resolve) => {
-    if (resolveFirstRefresh === undefined) {
-      resolveFirstRefresh = resolve;
-    } else {
-      refreshResponses.push(resolve);
-    }
-  });
-const firstRefresh = accessContext.refreshMatchAccess("42", 5);
-await Promise.resolve();
-const queuedRefresh = accessContext.refreshMatchAccess("42", 6);
-await queuedRefresh;
-if (accessContext.matchAccessRefreshPendingRevision !== 6) {
-  throw new Error("in-flight match access refresh did not retain the newest requested revision");
-}
-resolveFirstRefresh({
-  player: 1,
-  revision: 5,
-  active_player: 1,
-  completed: false,
-  deadline_at_ms: 8_000,
-  server_time_ms: 2_000,
+  ...extra,
 });
-await firstRefresh;
-await Promise.resolve();
-if (refreshResponses.length !== 1 || !accessContext.matchAccessRefreshInFlight) {
-  throw new Error("queued match access refresh was not started after the in-flight response");
+const chromeWasm = {};
+for (const name of [
+  "session_start",
+  "session_set_active",
+  "subscribe_match",
+  "unsubscribe_match",
+  "unsubscribe_lobby",
+  "send_concession",
+  "interrupt_match_gesture",
+]) {
+  chromeWasm[name] = (...args) => chromeCalls.push([name, ...args]);
 }
-refreshResponses[0]({
-  player: 1,
-  revision: 6,
-  active_player: 2,
-  completed: false,
-  deadline_at_ms: 9_000,
-  server_time_ms: 2_100,
-});
-await new Promise((resolve) => setImmediate(resolve));
-if (
-  accessContext.matchAccessRevision !== 6 ||
-  accessContext.matchAccessRefreshInFlight ||
-  accessContext.matchAccessRefreshPendingRevision !== null
-) {
-  throw new Error("queued match access refresh did not converge to the newest requested revision");
-}
-let staleRefreshRequests = 0;
-accessContext.apiRequest = async () => {
-  staleRefreshRequests += 1;
-  return {
-    player: 1,
-    revision: 6,
-    active_player: 2,
-    completed: false,
-    deadline_at_ms: 9_000,
-    server_time_ms: 2_200,
-  };
-};
-await accessContext.refreshMatchAccess("42", 7);
-await new Promise((resolve) => setImmediate(resolve));
-if (
-  staleRefreshRequests !== 1 ||
-  accessContext.matchAccessRefreshInFlight ||
-  accessContext.matchAccessRefreshPendingRevision !== null
-) {
-  throw new Error("stale match access response created an unbounded immediate refresh loop");
-}
-
-const socketStart = source.indexOf("function updateTurnTimer() {");
-const socketEnd = source.indexOf("async function refreshSession() {", socketStart);
-if (socketStart < 0 || socketEnd < 0) {
-  throw new Error("cannot locate match socket lifecycle in bootstrap.js");
-}
-const scheduledReconnects = [];
-const socketListeners = new Map();
-const socketModule = {
-  ready: false,
-  reconnect: false,
-  delay: 2_000,
-  connectCount: 0,
-  disconnectCount: 0,
-  connect_match_socket() {
-    this.connectCount += 1;
-  },
-  disconnect_match_socket() {
-    this.disconnectCount += 1;
-  },
-  match_socket_ready() {
-    return this.ready;
-  },
-  match_socket_needs_reconnect() {
-    return this.reconnect;
-  },
-  match_socket_retry_delay_ms() {
-    return this.delay;
-  },
-  commandRejected: false,
-  match_command_rejected() {
-    const rejected = this.commandRejected;
-    this.commandRejected = false;
-    return rejected;
-  },
-  match_revision() {
-    return 3;
-  },
-  match_active_player() {
-    return 1;
-  },
-  commandPending: false,
-  match_has_pending_prediction() {
-    return this.commandPending;
-  },
-  match_winner() {
-    return 0;
-  },
-  match_accepts_gameplay_commands() {
-    return this.match_winner() === 0;
-  },
-  match_completion_reason() {
-    return "";
-  },
-};
-const socketContext = {
-  URLSearchParams,
+const chromeContext = {
   URL,
+  URLSearchParams,
+  JSON,
   Number,
   Math,
-  performance: { now: () => 0 },
-  Date: { now: () => 0 },
+  Object,
+  Date: { now: () => 1_000 },
+  console: { error() {} },
   navigator: { onLine: true },
   document: {
     visibilityState: "visible",
     addEventListener(name, listener) {
-      socketListeners.set(`document:${name}`, listener);
+      chromeListeners.set(`document:${name}`, listener);
     },
   },
   window: {
-    location: { protocol: "https:", host: "pwmtf.example", search: "?match=42" },
-    setTimeout(callback, delay) {
-      scheduledReconnects.push({ callback, delay });
-      return scheduledReconnects.length;
+    location: { href: "https://pwmtf.example/?player_one=1", search: "" },
+    history: {
+      pushState(state, title, url) {
+        chromeCalls.push(["pushState", String(url)]);
+      },
     },
-    clearTimeout() {},
-    setInterval(callback) {
-      socketContext.monitor = callback;
-      return 1;
+    setInterval(callback, delay) {
+      const id = nextChromeInterval;
+      nextChromeInterval += 1;
+      chromeIntervals.set(id, { callback, delay });
+      return id;
     },
-    clearInterval() {},
+    clearInterval(id) {
+      chromeIntervals.delete(id);
+    },
     addEventListener(name, listener) {
-      socketListeners.set(`window:${name}`, listener);
+      chromeListeners.set(`window:${name}`, listener);
     },
-    confirm: () => false,
+    confirm: () => true,
   },
-  console: {
-    error() {},
-    queuedRefreshErrors: [],
+  MATCH_ID_PATTERN: /^\d{1,39}$/u,
+  wasmModule: chromeWasm,
+  feasibility: null,
+  localAudio: { context: null },
+  playRevisionCue() {
+    chromeCalls.push(["cue"]);
   },
-  concedeMatchButton: { hidden: true, disabled: false, addEventListener() {} },
-  offerRematchButton: { hidden: true, disabled: false, textContent: "Offer rematch" },
-  matchStatus: { textContent: "" },
-  matchResult: {
-    hidden: true,
-    dataset: {},
-    removeAttribute(name) {
-      if (name === "data-outcome") delete this.dataset.outcome;
-    },
+  refreshSocialState: async () => {
+    chromeCalls.push(["social"]);
   },
-  matchResultTitle: { textContent: "" },
-  matchResultDetail: { textContent: "" },
-  turnTimer: {
-    hidden: true,
-    textContent: "",
-    dataset: {},
-    removeAttribute(name) {
-      if (name === "data-expired") delete this.dataset.expired;
-    },
+  refreshLobby: async () => {
+    chromeCalls.push(["lobby"]);
   },
-  updateGameplayAudio() {},
-  stopLobbyPolling() {},
-  disconnectLobbyPresence: async () => {},
-  matchSocketActive: false,
-  matchReconnectTimer: null,
-  matchSubscriptionUrl: null,
-  matchConnectStartedAt: null,
-  matchPlayerSeat: 1,
-  matchDeadlineAtMs: null,
-  matchDeadlineRevision: null,
-  matchServerTimeOffsetMs: 0,
-  matchServerTimeRequestStartedAt: 0,
-  matchServerTimeUncertaintyMs: 0,
-  matchAccessRevision: 3,
-  matchAccessRefreshInFlight: false,
-  matchAccessRefreshPendingRevision: null,
-  apiRequest: async () => ({
-    player: 1,
-    revision: 3,
-    active_player: 1,
-    completed: false,
-    deadline_at_ms: 10_000,
-    server_time_ms: 1_000,
-  }),
+  clearLobby() {
+    chromeCalls.push(["clearLobby"]);
+  },
+  socialPanel: { open: false },
+  socialStatus: { textContent: "" },
+  matchStatus: chromeElement(),
+  concedeMatchButton: chromeElement(),
+  offerRematchButton: chromeElement(),
+  matchResult: chromeElement(),
+  matchResultTitle: chromeElement(),
+  matchResultDetail: chromeElement(),
+  turnTimer: chromeElement(),
 };
-vm.createContext(socketContext);
+vm.createContext(chromeContext);
 vm.runInContext(
-  `${source.slice(socketStart, socketEnd)}\nthis.startMatchSocket = startMatchSocket;`,
-  socketContext,
+  `${chromeSource}
+this.handleSessionEvent = handleSessionEvent;
+this.enterMatch = enterMatch;
+this.ensureSession = ensureSession;
+this.signIn = () => { signedIn = true; };`,
+  chromeContext,
 );
-socketContext.startMatchSocket(socketModule);
-if (socketModule.connectCount !== 1 || typeof socketContext.monitor !== "function") {
-  throw new Error("match socket lifecycle did not start its initial connection and monitor");
+const sent = (name) => chromeCalls.filter((call) => call[0] === name);
+const emit = (name, detail) => chromeContext.handleSessionEvent(name, JSON.stringify(detail));
+const matchEvent = (overrides = {}) => ({
+  match_id: "42",
+  revision: 3,
+  seat: 1,
+  active_player: 1,
+  winner: 0,
+  completion_reason: "",
+  ball_in_hand: false,
+  pending: false,
+  playing: false,
+  deadline_at_ms: 10_000,
+  server_offset_ms: 500,
+  clock_uncertainty_ms: 20,
+  ...overrides,
+});
+const status = () => chromeContext.matchStatus.textContent;
+
+chromeContext.signIn();
+chromeContext.ensureSession();
+chromeContext.ensureSession();
+if (sent("session_start").length !== 1) {
+  throw new Error("session did not start exactly once");
 }
-socketModule.ready = true;
-socketContext.monitor();
-if (!socketContext.matchSocketActive || socketContext.matchStatus.textContent !== "Connected · revision 3 · your turn") {
-  throw new Error("ready match socket was not presented as connected with authoritative turn state");
-}
-socketModule.commandPending = true;
-socketContext.monitor();
+chromeContext.enterMatch("42", { push: true });
 if (
-  socketContext.matchStatus.textContent !== "Waiting for authority…" ||
-  !socketContext.concedeMatchButton.disabled
+  sent("subscribe_match").length !== 1 ||
+  sent("subscribe_match")[0][1] !== "42" ||
+  sent("pushState").length !== 1 ||
+  !sent("pushState")[0][1].endsWith("/?match=42")
 ) {
-  throw new Error("pending prediction did not disable duplicate controls");
+  throw new Error("entering a match did not push history and subscribe without reloading");
 }
-socketModule.commandPending = false;
-socketModule.commandRejected = true;
-socketContext.monitor();
-if (socketContext.matchStatus.textContent !== "Command rejected · synchronized to authority") {
-  throw new Error("authoritative command rejection was not presented without disconnecting");
+emit("connection", { status: "ready" });
+if (sent("social").length !== 1 || status() !== "Loading match…") {
+  throw new Error("ready connection did not catch up social lists while awaiting match state");
 }
-socketModule.match_winner = () => 1;
-socketModule.match_completion_reason = () => "legal-eight-ball";
-socketContext.monitor();
+emit("match", matchEvent());
+if (status() !== "Connected · revision 3 · your turn" || chromeContext.concedeMatchButton.hidden) {
+  throw new Error(`match event did not render authoritative turn state: ${status()}`);
+}
+// remaining = deadline - (now + offset) + uncertainty = 10000 - 1500 + 20.
+if (chromeContext.turnTimer.hidden || chromeContext.turnTimer.textContent !== "9s") {
+  throw new Error(`turn timer did not use the event clock sample: ${chromeContext.turnTimer.textContent}`);
+}
+if ([...chromeIntervals.values()].some((interval) => interval.delay !== 250) || chromeIntervals.size !== 1) {
+  throw new Error("turn timer did not run exactly one 250 ms local tick");
+}
+if (chromeContext.matchStatus.dataset.revision !== "3" || chromeContext.matchStatus.dataset.seat !== "1") {
+  throw new Error("match status did not expose the authoritative revision and seat");
+}
+emit("match", matchEvent({ pending: true }));
+if (!status().includes("waiting for authority") || !chromeContext.concedeMatchButton.disabled) {
+  throw new Error("pending command did not disable duplicate controls");
+}
+emit("match", matchEvent({ revision: 4, active_player: 2, playing: true }));
+if (!status().includes("revision 4 · shot in progress") || sent("cue").length !== 1) {
+  throw new Error("accepted shot playback was not presented");
+}
+emit("match", matchEvent({ revision: 4, active_player: 2 }));
+if (status() !== "Connected · revision 4 · player 2's turn") {
+  throw new Error(`opponent turn was not presented: ${status()}`);
+}
+emit("rejected", { match_id: "42", reason: "stale-revision" });
+if (!status().startsWith("The table changed before your move arrived.") || !status().includes("Connected · revision 4")) {
+  throw new Error(`rejection reason was not presented: ${status()}`);
+}
+emit("rejected", { match_id: "7", reason: "wrong-turn" });
+if (status().includes("not your turn")) {
+  throw new Error("rejection for another match changed this match's chrome");
+}
+emit("match", matchEvent({ match_id: "7", revision: 99 }));
+emit("match", matchEvent({ seat: 3, revision: 98 }));
+if (chromeContext.matchStatus.dataset.revision !== "4") {
+  throw new Error("foreign or invalid match events were not ignored");
+}
+emit("match", matchEvent({ revision: 5 }));
+if (status().includes("The table changed")) {
+  throw new Error("a newer revision did not clear the previous rejection");
+}
+const subscriptionsBeforeForeignStart = sent("subscribe_match").length;
+emit("match-started", { lobby_id: "0", match_id: "44" });
+if (sent("subscribe_match").length !== subscriptionsBeforeForeignStart || chromeContext.matchStatus.dataset.revision !== "5") {
+  throw new Error("an unrelated match start pulled this tab out of its in-progress match");
+}
+emit("connection", { status: "reconnecting" });
+if (status() !== "Connection lost · reconnecting" || !chromeContext.concedeMatchButton.hidden) {
+  throw new Error("lost connection was not presented");
+}
+emit("connection", { status: "ready" });
+chromeContext.document.visibilityState = "hidden";
+chromeListeners.get("document:visibilitychange")();
+const lastActivity = sent("session_set_active").at(-1);
+if (lastActivity?.[1] !== false || sent("interrupt_match_gesture").length !== 1) {
+  throw new Error("hidden tab did not interrupt gestures and deactivate the session");
+}
+chromeContext.document.visibilityState = "visible";
+chromeListeners.get("document:visibilitychange")();
+if (sent("session_set_active").at(-1)?.[1] !== true) {
+  throw new Error("visible tab did not reactivate the session");
+}
+chromeListeners.get("element:click")();
+if (sent("send_concession").at(-1)?.[1] !== 1) {
+  throw new Error("concession did not use the seat from the match event");
+}
+emit("match", matchEvent({
+  revision: 6,
+  active_player: 0,
+  winner: 1,
+  completion_reason: "legal-eight-ball",
+  deadline_at_ms: null,
+}));
 if (
-  !socketContext.matchResultTitle.textContent.includes("You win") ||
-  socketContext.matchResult.hidden ||
-  socketContext.concedeMatchButton.hidden !== true ||
-  socketContext.offerRematchButton.hidden !== false
+  !chromeContext.matchResultTitle.textContent.includes("You win") ||
+  chromeContext.matchResult.hidden ||
+  !chromeContext.concedeMatchButton.hidden ||
+  chromeContext.offerRematchButton.hidden ||
+  !chromeContext.turnTimer.hidden ||
+  chromeIntervals.size !== 0
 ) {
-  throw new Error("authoritative completion did not present the result and rematch transition");
+  throw new Error("authoritative completion did not present the result and stop the timer");
 }
-socketModule.match_winner = () => 0;
-socketModule.match_completion_reason = () => "";
-socketModule.ready = false;
-socketModule.reconnect = true;
-socketContext.monitor();
-if (
-  socketContext.matchSocketActive ||
-  socketContext.matchStatus.textContent !== "Connection lost · reconnecting" ||
-  scheduledReconnects.length !== 1 ||
-  scheduledReconnects[0].delay !== socketModule.delay
-) {
-  throw new Error("failed ready socket did not schedule transport-owned reconnect backoff");
+emit("match-started", { lobby_id: "11", match_id: "43" });
+if (sent("subscribe_match").at(-1)?.[1] !== "43" || !sent("pushState").at(-1)[1].endsWith("?match=43")) {
+  throw new Error("lobby match start did not enter the new match without reloading");
 }
-scheduledReconnects[0].callback();
-if (socketModule.connectCount !== 2) {
-  throw new Error("scheduled match reconnect did not create another socket attempt");
+emit("subscription-denied", { kind: "match", id: "43" });
+if (status() !== "You are not a participant in this match.") {
+  throw new Error("denied match subscription was not presented");
+}
+emit("social-changed", {});
+if (sent("social").length < 3) {
+  throw new Error("social push did not refetch social lists");
 }
 
   console.log("browser telemetry self-tests passed");

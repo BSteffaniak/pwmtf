@@ -41,6 +41,18 @@ if [ -d packages ]; then
     fi
 fi
 
+# The browser speaks only the binary session protocol through WASM exports:
+# no match polling, query-string sockets, lobby leases, or per-match sockets.
+check_web_pattern() {
+    label=$1
+    pattern=$2
+    if [ -d packages/client/web ] && grep -R -n -E "$pattern" packages/client/web --include='*.js' --include='*.html' 2>/dev/null; then
+        report_violation "$label"
+    fi
+}
+
+check_web_pattern "legacy browser match transport" '(/ws\?|connect_match_socket|disconnect_match_socket|match_socket_ready|match_socket_needs_reconnect|match_socket_retry_delay_ms|match_has_pending_prediction|set_match_player|refreshMatchAccess|/connections/|/api/matches/\$\{matchId\}`)'
+
 check_pattern "application-owned raw SQL" '(SELECT[[:space:]]|INSERT[[:space:]]+INTO|UPDATE[[:space:]]+[[:alnum:]_]+[[:space:]]+SET|DELETE[[:space:]]+FROM|CREATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE)' packages
 check_pattern "game-domain infrastructure dependency" '(^|[^[:alnum:]_])(bevy|lightyear|switchy[_-][[:alnum:]_]*|actix[-_][[:alnum:]_]*|axum|database|http|websocket|tokio)([^[:alnum:]_]|$)' packages/game_domain
 check_pattern "game-domain client authority vocabulary" '(ClientAuthoritative|client_authoritative|ReportedBallState|reported_ball_state)' packages/game_domain

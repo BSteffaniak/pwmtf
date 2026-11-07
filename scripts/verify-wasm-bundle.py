@@ -18,6 +18,7 @@ BUNDLE_HASH_ALGORITHM = "sha256-length-prefixed-v1"
 EXPECTED_ASSETS = {
     "bootstrap.js",
     "brand-mark.svg",
+    "feasibility.js",
     "manifest.webmanifest",
     "install.js",
     "icon-180.png",

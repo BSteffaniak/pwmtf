@@ -80,6 +80,11 @@ grep -qi '^Content-Security-Policy: default-src' "$tmp/headers"
 grep -qi '^Cross-Origin-Opener-Policy: same-origin' "$tmp/headers"
 grep -qi '^Cross-Origin-Resource-Policy: same-origin' "$tmp/headers"
 
+curl --fail --silent --dump-header "$tmp/feasibility-headers" --output "$tmp/feasibility.js" \
+    "http://127.0.0.1:$port/feasibility.js"
+cmp "$root/dist/feasibility.js" "$tmp/feasibility.js"
+grep -qi '^Content-Type: text/javascript; charset=utf-8' "$tmp/feasibility-headers"
+
 curl --fail --silent --dump-header "$tmp/brand-headers" --output "$tmp/brand-mark.svg" \
     "http://127.0.0.1:$port/brand-mark.svg"
 cmp "$root/dist/brand-mark.svg" "$tmp/brand-mark.svg"

@@ -31,7 +31,9 @@ tower-http                  = { workspace = true }
 turso                       = { workspace = true }
 
 [dev-dependencies]
-futures-lite = { workspace = true }
+futures-lite      = { workspace = true }
+futures-util      = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [features]
 default          = []

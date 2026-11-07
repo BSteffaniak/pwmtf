@@ -11,6 +11,11 @@ ignore = [
     # private-key operation, so the private-key timing recovery attack is
     # unreachable. Remove when openidconnect migrates to a fixed RSA line.
     "RUSTSEC-2023-0071",
+    # openidconnect 4.0.1 -> p256/p384 -> elliptic-curve 0.13 -> crypto-bigint 0.5.
+    # PWMTF only verifies provider ECDSA signatures over public data with public
+    # keys, so no secret integer reaches the affected arithmetic. No semver-
+    # compatible fix exists on the 0.5 line. Remove when openidconnect migrates.
+    "RUSTSEC-2026-0387",
     # switchy_schema 0.4.0 -> moosicbox_json_utils -> switchy_database ->
     # moosicbox_profiles(api) -> actix-web -> actix-http -> h2 0.3.27.
     # PWMTF enables Switchy code/schema and simulator builders only and does not

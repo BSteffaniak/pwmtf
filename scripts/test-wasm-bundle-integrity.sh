@@ -36,6 +36,16 @@ printf '%s\n' tampered >>"$tmp/tampered/styles.css"
 expect_rejected "a modified asset" "$tmp/tampered"
 grep -Eq 'candidate bundle hash does not match generated assets|do not match the integrity manifest' "$tmp/rejected.err"
 
+copy_bundle "$tmp/tampered-feasibility"
+printf '%s\n' '// tampered' >>"$tmp/tampered-feasibility/feasibility.js"
+expect_rejected "a modified feasibility module" "$tmp/tampered-feasibility"
+grep -Eq 'candidate bundle hash does not match generated assets|do not match the integrity manifest' "$tmp/rejected.err"
+
+copy_bundle "$tmp/missing-feasibility"
+rm "$tmp/missing-feasibility/feasibility.js"
+expect_rejected "a missing feasibility module" "$tmp/missing-feasibility"
+grep -q 'missing feasibility.js' "$tmp/rejected.err"
+
 copy_bundle "$tmp/missing"
 rm "$tmp/missing/index.html"
 expect_rejected "a missing asset" "$tmp/missing"
