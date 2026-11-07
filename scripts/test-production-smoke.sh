@@ -64,7 +64,7 @@ if [ "$status" != 200 ] || [ "$(cat "$response_body")" != ok ]; then
 fi
 grep -qi '^strict-transport-security: max-age=63072000; includeSubDomains' "$response_headers"
 grep -qi '^cache-control: no-store' "$response_headers"
-grep -qi '^referrer-policy: no-referrer' "$response_headers"
+grep -qi '^referrer-policy: same-origin' "$response_headers"
 grep -qi '^x-content-type-options: nosniff' "$response_headers"
 grep -qi '^permissions-policy: camera=(), geolocation=(), microphone=()' "$response_headers"
 grep -qi '^cross-origin-opener-policy: same-origin' "$response_headers"
@@ -93,7 +93,7 @@ if grep -qi '^cache-control:.*\bpublic\b' "$response_headers"; then
     printf '%s\n' "canonical application response is publicly cacheable" >&2
     exit 1
 fi
-grep -qi '^referrer-policy: no-referrer' "$response_headers"
+grep -qi '^referrer-policy: same-origin' "$response_headers"
 grep -qi '^cross-origin-opener-policy: same-origin' "$response_headers"
 grep -qi '^cross-origin-resource-policy: same-origin' "$response_headers"
 grep -qi '^x-content-type-options: nosniff' "$response_headers"

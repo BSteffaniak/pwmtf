@@ -35,7 +35,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$url" in
     https://pwmtf.hyperchad.dev/healthz)
-        printf 'HTTP/1.1 200 OK\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nPermissions-Policy: camera=(), geolocation=(), microphone=()\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\n\r\n' >"$headers"
+        printf 'HTTP/1.1 200 OK\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nCache-Control: no-store\r\nReferrer-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\nPermissions-Policy: camera=(), geolocation=(), microphone=()\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\n\r\n' >"$headers"
         printf ok >"$body"
         ;;
     https://pwmtf.hyperchad.dev/readyz)
@@ -43,7 +43,7 @@ case "$url" in
         printf ready >"$body"
         ;;
     https://pwmtf.hyperchad.dev/)
-        printf 'HTTP/1.1 200 OK\r\nContent-Security-Policy: default-src self\r\nCache-Control: %s\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\n\r\n' "${PWMTF_FAKE_APPLICATION_CACHE:-no-cache}" >"$headers"
+        printf 'HTTP/1.1 200 OK\r\nContent-Security-Policy: default-src self\r\nCache-Control: %s\r\nReferrer-Policy: same-origin\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\n\r\n' "${PWMTF_FAKE_APPLICATION_CACHE:-no-cache}" >"$headers"
         printf '%s' '<link rel="canonical" href="https://pwmtf.hyperchad.dev/" /><main data-client-state="loading">' >"$body"
         ;;
     https://pwmtf.hyperchad.dev/pwmtf-bundle-manifest.json)

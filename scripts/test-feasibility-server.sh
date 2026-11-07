@@ -185,7 +185,7 @@ curl \
     "https://127.0.0.1:$port/?feasibility"
 grep -qi '^Cache-Control: no-store' "$tmp/headers"
 grep -qi '^Permissions-Policy: camera=(), geolocation=(), microphone=()' "$tmp/headers"
-grep -qi '^Referrer-Policy: no-referrer' "$tmp/headers"
+grep -qi '^Referrer-Policy: same-origin' "$tmp/headers"
 grep -qi '^X-Content-Type-Options: nosniff' "$tmp/headers"
 grep -qi '^Cross-Origin-Opener-Policy: same-origin' "$tmp/headers"
 grep -qi '^Cross-Origin-Resource-Policy: same-origin' "$tmp/headers"

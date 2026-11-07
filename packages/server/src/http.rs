@@ -393,7 +393,7 @@ pub fn router(state: Arc<HttpState>) -> Router {
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::REFERRER_POLICY,
-            HeaderValue::from_static("no-referrer"),
+            HeaderValue::from_static("same-origin"),
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
