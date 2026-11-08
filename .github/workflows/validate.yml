@@ -33,6 +33,14 @@ jobs:
           node --version
           google-chrome --version
           microsoft-edge --version
+          # The runner image ships Edge's SUID sandbox helper without root
+          # ownership and the setuid bit, so Edge aborts on launch. Repair it
+          # rather than disabling the sandbox.
+          edge_sandbox=/opt/microsoft/msedge/msedge-sandbox
+          if [ -e "$edge_sandbox" ]; then
+            sudo chown root:root "$edge_sandbox"
+            sudo chmod 4755 "$edge_sandbox"
+          fi
           command -v curl
           command -v openssl
       - run: cargo fmt --check
