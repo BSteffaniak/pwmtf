@@ -315,6 +315,12 @@ aimMode.addEventListener("change", () => {
   savePresentationPreferences();
 });
 
+// App update state (see "App updates" below).
+let updateAvailable = false;
+let reloadWhenSafe = false;
+let lastUpdateCheckAt = 0;
+let pointerHeld = false;
+
 // Opponent handles keyed by match id, learned from the lobby list.
 const matchOpponents = new Map();
 let pendingIncoming = { challenges: 0, rematches: 0 };
@@ -939,6 +945,7 @@ function shortRejection(reason) {
 }
 
 function renderMatchHud() {
+  applyUpdateIfSafe();
   const inMatch = currentMatchId !== null;
   currentGameCard.hidden = !inMatch;
   openPlayLabel.textContent = inMatch ? "Friends" : "Play friends";
@@ -1666,6 +1673,117 @@ const sessionReady = runtimeAuthReady.then(() => refreshSession())
     accountLabel.textContent = "Could not check your account. Practice still works; reload to try again.";
     return undefined;
   });
+
+// ---------- App updates ----------
+// An installed app is often resumed from memory rather than reloaded, so it
+// can keep running an old build indefinitely. Compare the running build with
+// the one the page now references, and reload when it is safe: immediately
+// on returning to the app, otherwise after the user taps Refresh or the
+// next time the app comes back.
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const UPDATE_RESUME_MIN_GAP_MS = 15 * 1000;
+const updateBanner = document.querySelector("#update-banner");
+
+canvas.addEventListener("pointerdown", () => {
+  pointerHeld = true;
+});
+for (const name of ["pointerup", "pointercancel"]) {
+  window.addEventListener(name, () => {
+    pointerHeld = false;
+    applyUpdateIfSafe();
+  });
+}
+
+async function latestBuildId() {
+  const response = await fetch(`/?update-check=${Date.now()}`, {
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { Accept: "text/html" },
+  });
+  if (!response.ok) {
+    return null;
+  }
+  return /bootstrap\.js\?v=([A-Za-z0-9._-]{1,200})"/u.exec(await response.text())?.[1] ?? null;
+}
+
+/// Reloading now would not lose a shot in flight or interrupt a gesture.
+function updateIsSafe() {
+  return !pointerHeld && (currentMatch === null || (!currentMatch.pending && !currentMatch.playing));
+}
+
+const UPDATE_ATTEMPT_KEY = "pwmtf.update-attempt";
+let latestKnownBuild = null;
+
+function applyUpdateIfSafe() {
+  if (!updateAvailable || !reloadWhenSafe || !updateIsSafe()) {
+    return;
+  }
+  // Reload automatically at most once per new build, so a deploy whose page
+  // and scripts disagree can never trap the app in a reload loop.
+  try {
+    if (window.sessionStorage.getItem(UPDATE_ATTEMPT_KEY) === latestKnownBuild) {
+      reloadWhenSafe = false;
+      return;
+    }
+    window.sessionStorage.setItem(UPDATE_ATTEMPT_KEY, latestKnownBuild);
+  } catch {
+    // Without storage the reload still happens; the banner covers a repeat.
+  }
+  window.location.reload();
+}
+
+async function checkForUpdate(resumed) {
+  // Builds without an injected identity (local tooling) cannot compare.
+  if (candidateBuildId.startsWith("__")) {
+    return;
+  }
+  const now = Date.now();
+  if (now - lastUpdateCheckAt < (resumed ? UPDATE_RESUME_MIN_GAP_MS : UPDATE_CHECK_INTERVAL_MS / 2)) {
+    return;
+  }
+  lastUpdateCheckAt = now;
+  const latest = await latestBuildId().catch(() => null);
+  if (latest === null || latest === candidateBuildId) {
+    return;
+  }
+  latestKnownBuild = latest;
+  updateAvailable = true;
+  updateBanner.hidden = false;
+  if (resumed) {
+    // The user just came back: update before they start playing again.
+    reloadWhenSafe = true;
+    applyUpdateIfSafe();
+  }
+}
+
+document.querySelector("#update-now").addEventListener("click", () => {
+  // An explicit tap always reloads, whatever happened on earlier attempts.
+  try {
+    window.sessionStorage.removeItem(UPDATE_ATTEMPT_KEY);
+  } catch {
+    // Storage may be unavailable; reloading still works.
+  }
+  reloadWhenSafe = true;
+  applyUpdateIfSafe();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    void checkForUpdate(true);
+  } else if (updateAvailable) {
+    // Apply the update the next time the app comes back.
+    reloadWhenSafe = true;
+  }
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    void checkForUpdate(true);
+  }
+});
+window.setInterval(() => {
+  if (document.visibilityState === "visible") {
+    void checkForUpdate(false);
+  }
+}, UPDATE_CHECK_INTERVAL_MS);
 
 const initialMatchId = query.get("match");
 if (isDecimalId(initialMatchId)) {
