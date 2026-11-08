@@ -533,7 +533,7 @@ async fn shots_broadcast_transitions_previews_route_to_opponent_and_rejections_c
 
     // The next deadline starts after the shot's authoritative playback.
     let offset = PhysicsProfile::standard().playback_millis(playback_ticks)
-        + RulesProfile::standard().turn_duration_millis();
+        + RulesProfile::standard().turn_duration_millis().unwrap();
     let deadline = observer_view.deadline_at_ms.unwrap();
     assert!(
         deadline >= sent_at + offset,
@@ -571,7 +571,7 @@ async fn shots_broadcast_transitions_previews_route_to_opponent_and_rejections_c
     assert_eq!(last.playback_ticks, 0);
     assert_eq!(
         timed_out.deadline_at_ms,
-        Some(deadline + RulesProfile::standard().turn_duration_millis())
+        Some(deadline + RulesProfile::standard().turn_duration_millis().unwrap())
     );
     assert_eq!(one.match_state().await.revision, 2);
 }

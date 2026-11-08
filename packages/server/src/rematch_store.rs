@@ -176,7 +176,9 @@ pub async fn accept_rematch(
             revision: 0,
             player: state.active_player(),
         },
-        due_at: DeadlineMillis::after_turn(accepted_at, state.rules()),
+        // PWMTF only creates timed (standard-profile) matches.
+        due_at: DeadlineMillis::after_turn(accepted_at, state.rules())
+            .ok_or(RematchStoreError::Malformed)?,
     };
     tx.insert("matches")
         .value("match_id", new_match_id.value().to_string())

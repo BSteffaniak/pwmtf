@@ -114,10 +114,14 @@ impl DeadlineMillis {
         Self(value)
     }
 
-    /// Creates a deadline one turn after `now` using an immutable rules profile.
+    /// Creates a deadline one turn after `now` using an immutable rules
+    /// profile, or `None` when the profile's turns are untimed.
     #[must_use]
-    pub const fn after_turn(now: Self, rules: pwmtf_eight_ball::RulesProfile) -> Self {
-        Self(now.0.saturating_add(rules.turn_duration_millis()))
+    pub const fn after_turn(now: Self, rules: pwmtf_eight_ball::RulesProfile) -> Option<Self> {
+        match rules.turn_duration_millis() {
+            Some(duration) => Some(Self(now.0.saturating_add(duration))),
+            None => None,
+        }
     }
 
     /// Creates the next turn deadline after an accepted command: the turn
@@ -131,7 +135,7 @@ impl DeadlineMillis {
         physics: pwmtf_billiards::PhysicsProfile,
         playback_ticks: u32,
         rules: pwmtf_eight_ball::RulesProfile,
-    ) -> Self {
+    ) -> Option<Self> {
         Self::after_turn(
             Self(
                 now.0
@@ -842,17 +846,18 @@ impl<J: CommandJournal> MatchService<J> {
             candidate.status(),
             pwmtf_eight_ball::MatchStatus::InProgress
         ) {
-            Some(ScheduledDeadline {
+            DeadlineMillis::after_playback_and_turn(
+                now,
+                candidate.physics(),
+                playback_ticks,
+                candidate.rules(),
+            )
+            .map(|due_at| ScheduledDeadline {
                 id: DeadlineId {
                     revision,
                     player: candidate.active_player(),
                 },
-                due_at: DeadlineMillis::after_playback_and_turn(
-                    now,
-                    candidate.physics(),
-                    playback_ticks,
-                    candidate.rules(),
-                ),
+                due_at,
             })
         } else {
             None
@@ -1030,11 +1035,14 @@ mod tests {
     #[test]
     fn deadline_after_turn_uses_the_pinned_profile_duration_and_saturates() {
         assert_eq!(
-            DeadlineMillis::after_turn(DeadlineMillis::new(7), RulesProfile::standard()).value(),
-            7 + RulesProfile::standard().turn_duration_millis()
+            DeadlineMillis::after_turn(DeadlineMillis::new(7), RulesProfile::standard())
+                .unwrap()
+                .value(),
+            7 + RulesProfile::standard().turn_duration_millis().unwrap()
         );
         assert_eq!(
             DeadlineMillis::after_turn(DeadlineMillis::new(u64::MAX), RulesProfile::standard())
+                .unwrap()
                 .value(),
             u64::MAX
         );
@@ -1132,7 +1140,7 @@ mod tests {
             assert!(playback > 0);
             assert_eq!(
                 acknowledgement.deadline.unwrap().due_at.value(),
-                1_000 + playback + RulesProfile::standard().turn_duration_millis()
+                1_000 + playback + RulesProfile::standard().turn_duration_millis().unwrap()
             );
             assert_eq!(
                 service.journal.records[0].deadline,

@@ -111,7 +111,8 @@ pub enum PocketId {
 }
 
 impl PocketId {
-    const ALL: [Self; 6] = [
+    /// Every pocket, in canonical order.
+    pub const ALL: [Self; 6] = [
         Self::TopLeft,
         Self::TopCenter,
         Self::TopRight,
@@ -245,6 +246,12 @@ impl TableGeometry {
     #[must_use]
     pub const fn pocket_radius(self) -> Scalar {
         self.pocket_radius
+    }
+
+    /// Returns the canonical center of a pocket's capture area.
+    #[must_use]
+    pub const fn pocket_center(self, pocket: PocketId) -> Vector {
+        pocket_position(pocket, self)
     }
 
     /// Continuous cushion noses and pocket facings. Each pair is a segment;

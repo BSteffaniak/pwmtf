@@ -21,6 +21,13 @@ pub const MATCH_COMMAND_RESULT_VERSION: u16 = 1;
 pub const MATCH_STATE_VERSION: u16 = 1;
 /// Current launch rules profile version.
 pub const RULES_PROFILE_VERSION: u16 = 1;
+/// Casual house-rules profile version (Cozy Lounge).
+///
+/// An 8-ball pocketed on the break is re-spotted, a break that pockets any
+/// object ball without a foul keeps the turn, shooting at the 8 requires a
+/// called pocket, a scratched cue ball is re-spotted with adjustable
+/// ball-in-hand, and there is no turn timer.
+pub const LOUNGE_RULES_PROFILE_VERSION: u16 = 2;
 const TURN_DURATION_MILLIS_V1: u64 = 30_000;
 
 /// Immutable versioned 8-ball rules configuration.
@@ -36,11 +43,37 @@ impl RulesProfile {
     ///
     /// Returns [`RulesProfileError::UnsupportedVersion`] for unknown versions.
     pub const fn new(version: u16) -> Result<Self, RulesProfileError> {
-        if version == RULES_PROFILE_VERSION {
+        if version == RULES_PROFILE_VERSION || version == LOUNGE_RULES_PROFILE_VERSION {
             Ok(Self { version })
         } else {
             Err(RulesProfileError::UnsupportedVersion(version))
         }
+    }
+
+    /// Returns the casual house-rules profile.
+    #[must_use]
+    pub const fn lounge() -> Self {
+        Self {
+            version: LOUNGE_RULES_PROFILE_VERSION,
+        }
+    }
+
+    const fn is_lounge(self) -> bool {
+        self.version == LOUNGE_RULES_PROFILE_VERSION
+    }
+
+    /// Whether a shot at the 8-ball is refused without a called pocket,
+    /// rather than resolving as a loss.
+    #[must_use]
+    pub const fn requires_eight_call(self) -> bool {
+        self.is_lounge()
+    }
+
+    /// Whether ball-in-hand stays active after a placement, so the shooter
+    /// can adjust the cue ball until shooting.
+    #[must_use]
+    pub const fn ball_in_hand_adjustable(self) -> bool {
+        self.is_lounge()
     }
 
     /// Returns the launch rules profile.
@@ -57,12 +90,13 @@ impl RulesProfile {
         self.version
     }
 
-    /// Returns this profile's authoritative turn duration in milliseconds.
+    /// Returns this profile's authoritative turn duration in milliseconds, or
+    /// `None` when turns are untimed.
     #[must_use]
-    pub const fn turn_duration_millis(self) -> u64 {
+    pub const fn turn_duration_millis(self) -> Option<u64> {
         match self.version {
-            RULES_PROFILE_VERSION => TURN_DURATION_MILLIS_V1,
-            _ => unreachable!(),
+            RULES_PROFILE_VERSION => Some(TURN_DURATION_MILLIS_V1),
+            _ => None,
         }
     }
 }
@@ -721,7 +755,7 @@ impl MatchState {
             balls,
         )
         .map_err(|_| MatchError::InvalidCuePlacement)?;
-        self.ball_in_hand = false;
+        self.ball_in_hand = self.rules.ball_in_hand_adjustable();
         Ok(())
     }
 
@@ -777,6 +811,12 @@ impl MatchState {
     ) -> Result<(ShotResolution, u32), MatchError> {
         if !matches!(self.status, MatchStatus::InProgress) {
             return Err(MatchError::Completed);
+        }
+        if self.rules.requires_eight_call()
+            && called_pocket.is_none()
+            && self.objective(self.active_player) == Objective::EightBall
+        {
+            return Err(MatchError::EightBallCallRequired);
         }
         let before = self.table.clone();
         let result = simulate_shot(self.geometry, self.physics, before.clone(), command)?;
@@ -835,7 +875,8 @@ impl MatchState {
             .iter()
             .find(|(ball, _)| ball.number() == 8)
             .copied();
-        if on_break && eight_pocket.is_some() {
+        let lounge = self.rules.is_lounge();
+        if on_break && eight_pocket.is_some() && !lounge {
             self.rerack_count = self.rerack_count.saturating_add(1);
             self.table = standard_rack(
                 self.geometry,
@@ -860,9 +901,16 @@ impl MatchState {
             ));
         }
 
-        self.table = result.state;
+        // House rules re-spot a break 8 instead of reracking (the only way
+        // to reach here with a break 8 pocketed).
+        let respot_eight = on_break && eight_pocket.is_some();
+        self.table = if respot_eight {
+            respot(&result.state, self.geometry, 8, foot_spot(self.geometry))?
+        } else {
+            result.state
+        };
         self.break_pending = false;
-        if let Some((_, actual_pocket)) = eight_pocket {
+        if let Some((_, actual_pocket)) = eight_pocket.filter(|_| !respot_eight) {
             let legal = fouls.is_empty()
                 && self.player_cleared_group(shooter, &before)
                 && called_pocket == Some(actual_pocket);
@@ -904,14 +952,22 @@ impl MatchState {
         }
 
         let continue_turn = fouls.is_empty()
-            && !on_break
-            && self
-                .group(shooter)
-                .is_some_and(|group| pocketed.iter().any(|(ball, _)| group.contains(*ball)));
+            && if on_break {
+                // House rules: a clean break that pockets any object ball keeps the turn.
+                lounge && pocketed.iter().any(|(ball, _)| *ball != BallId::CUE)
+            } else {
+                self.group(shooter)
+                    .is_some_and(|group| pocketed.iter().any(|(ball, _)| group.contains(*ball)))
+            };
         if !continue_turn {
             self.active_player = shooter.opponent();
         }
         self.ball_in_hand = !fouls.is_empty();
+        if lounge && fouls.contains(&Foul::Scratch) {
+            // House rules: the cue returns to the head spot; ball-in-hand lets
+            // the next shooter move it before shooting.
+            self.table = respot(&self.table, self.geometry, 0, head_spot(self.geometry))?;
+        }
         Ok((
             ShotResolution {
                 shooter,
@@ -1171,6 +1227,12 @@ pub enum MatchError {
     /// Canonical shot simulation failed.
     #[error(transparent)]
     Simulation(#[from] SimulationError),
+    /// This rules profile requires a called pocket when shooting at the 8.
+    #[error("a called pocket is required for the 8-ball")]
+    EightBallCallRequired,
+    /// No free position remained to re-spot a ball.
+    #[error("no free position to re-spot ball {0}")]
+    RespotUnavailable(u8),
 }
 
 /// Failure to decode a canonical match snapshot.
@@ -1385,6 +1447,81 @@ const fn group_for_ball(ball: BallId) -> Option<Group> {
         9..=15 => Some(Group::Stripes),
         _ => None,
     }
+}
+
+/// Where the rack's apex sits; a re-spotted 8 prefers it.
+const fn foot_spot(geometry: TableGeometry) -> Vector {
+    Vector::from_micros(geometry.half_width().micros() / 4, 0)
+}
+
+/// Where the cue ball starts a rack; a re-spotted cue ball prefers it.
+const fn head_spot(geometry: TableGeometry) -> Vector {
+    Vector::from_micros(-geometry.half_width().micros() / 2, 0)
+}
+
+/// Returns `table` with ball `number` stationary at `preferred`, or at the
+/// nearest free position on a ball-spaced grid: in bounds, clear of every
+/// in-play ball and of every pocket's capture area.
+fn respot(
+    table: &VersionedTableState,
+    geometry: TableGeometry,
+    number: u8,
+    preferred: Vector,
+) -> Result<VersionedTableState, MatchError> {
+    let id = BallId::new(number).map_err(|_| MatchError::RespotUnavailable(number))?;
+    let clear_of_pockets = |position: Vector| {
+        let reach = i128::from(geometry.pocket_radius().micros() + geometry.ball_radius().micros());
+        PocketId::ALL.into_iter().all(|pocket| {
+            let center = geometry.pocket_center(pocket);
+            let dx = i128::from(position.x.micros() - center.x.micros());
+            let dy = i128::from(position.y.micros() - center.y.micros());
+            dx * dx + dy * dy > reach * reach
+        })
+    };
+    let place = |position: Vector| {
+        if !clear_of_pockets(position) {
+            return None;
+        }
+        let mut balls = table.balls().to_vec();
+        let slot = balls.iter().position(|ball| ball.id == id)?;
+        balls[slot] = BallState::stationary(id, position);
+        VersionedTableState::new(table.version(), geometry, table.tick(), balls).ok()
+    };
+    if let Some(placed) = place(preferred) {
+        return Ok(placed);
+    }
+    let radius = geometry.ball_radius().micros();
+    let step = radius * 2 + radius / 4;
+    let (reach_x, reach_y) = (
+        geometry.half_width().micros() - radius,
+        geometry.half_height().micros() - radius,
+    );
+    let mut candidates = Vec::new();
+    let mut x = -reach_x;
+    while x <= reach_x {
+        let mut y = -reach_y;
+        while y <= reach_y {
+            candidates.push(Vector::from_micros(x, y));
+            y += step;
+        }
+        x += step;
+    }
+    let distance = |position: Vector| {
+        let dx = i128::from(position.x.micros() - preferred.x.micros());
+        let dy = i128::from(position.y.micros() - preferred.y.micros());
+        dx * dx + dy * dy
+    };
+    candidates.sort_by_key(|position| {
+        (
+            distance(*position),
+            position.x.micros(),
+            position.y.micros(),
+        )
+    });
+    candidates
+        .into_iter()
+        .find_map(place)
+        .ok_or(MatchError::RespotUnavailable(number))
 }
 
 fn derive_rerack_seed(seed: u64, rerack_count: u32) -> u64 {
@@ -1836,6 +1973,183 @@ mod tests {
         assert_eq!(timed.checksum(), untimed.checksum());
     }
 
+    fn lounge_state() -> MatchState {
+        MatchState::new(
+            RulesProfile::lounge(),
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            RackSeed::new(42),
+            Player::One,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn house_rules_keep_the_turn_after_a_clean_break_that_pockets_a_ball() {
+        let mut lounge = lounge_state();
+        lounge.table = side_pocket_state(1);
+        let result = lounge.play_shot(command(2_500, 3_000), None).unwrap();
+        assert!(result.fouls.is_empty());
+        assert_eq!(result.next_player, Some(Player::One));
+        assert_eq!(
+            result.assigned_group, None,
+            "groups are never set on the break"
+        );
+        let mut standard = match_state();
+        standard.table = side_pocket_state(1);
+        let result = standard.play_shot(command(2_500, 3_000), None).unwrap();
+        assert_eq!(result.next_player, Some(Player::Two));
+    }
+
+    #[test]
+    fn house_rules_respot_a_break_eight_instead_of_reracking() {
+        let mut game = lounge_state();
+        game.table = side_pocket_state(8);
+        let result = game.play_shot(command(2_500, 3_000), None).unwrap();
+        assert!(!result.reracked);
+        assert_eq!(result.status, MatchStatus::InProgress);
+        let eight = game.table.ball(BallId::new(8).unwrap()).unwrap();
+        assert!(!eight.pocketed);
+        assert_eq!(eight.position, foot_spot(game.geometry));
+        assert_eq!(game.rerack_count, 0);
+    }
+
+    #[test]
+    fn house_rules_refuse_an_uncalled_eight_ball_shot_atomically() {
+        let mut lounge = lounge_state();
+        lounge.break_pending = false;
+        lounge.player_one_group = Some(Group::Solids);
+        lounge.table = cleared_solids_eight_ball_state();
+        let before = lounge.clone();
+        assert_eq!(
+            lounge.play_shot(command(2_500, 3_000), None),
+            Err(MatchError::EightBallCallRequired)
+        );
+        assert_eq!(lounge, before);
+        // Standard rules resolve the same shot as a loss instead.
+        let mut standard = match_state();
+        standard.break_pending = false;
+        standard.player_one_group = Some(Group::Solids);
+        standard.table = cleared_solids_eight_ball_state();
+        let result = standard.play_shot(command(2_500, 3_000), None).unwrap();
+        assert!(
+            matches!(result.status, MatchStatus::Completed(outcome) if outcome.winner == Player::Two)
+        );
+    }
+
+    #[test]
+    fn house_rules_respot_a_scratched_cue_with_adjustable_ball_in_hand() {
+        let mut game = lounge_state();
+        game.break_pending = false;
+        game.table = VersionedTableState::new(
+            pwmtf_billiards::TABLE_STATE_VERSION,
+            TableGeometry::standard(),
+            0,
+            vec![pwmtf_billiards::BallState::stationary(
+                BallId::CUE,
+                pwmtf_billiards::Vector::from_micros(0, 500_000),
+            )],
+        )
+        .unwrap();
+        let result = game.play_shot(command(2_500, 2_000), None).unwrap();
+        assert!(result.fouls.contains(&Foul::Scratch));
+        assert!(game.ball_in_hand());
+        let cue = game.table.ball(BallId::CUE).unwrap();
+        assert!(!cue.pocketed);
+        assert_eq!(cue.position, head_spot(game.geometry));
+        // Placements can be adjusted until the shot.
+        for x in [-500_000, -400_000] {
+            game.place_cue_ball(pwmtf_billiards::Vector::from_micros(x, 0))
+                .unwrap();
+            assert!(game.ball_in_hand());
+        }
+        // Standard rules end ball-in-hand on the first placement.
+        let mut standard = match_state();
+        standard.ball_in_hand = true;
+        standard
+            .place_cue_ball(pwmtf_billiards::Vector::from_micros(-500_000, 0))
+            .unwrap();
+        assert!(!standard.ball_in_hand());
+    }
+
+    #[test]
+    fn respot_finds_the_nearest_free_spot_clear_of_balls_and_pockets() {
+        let geometry = TableGeometry::standard();
+        let spot = foot_spot(geometry);
+        let blocked = VersionedTableState::new(
+            pwmtf_billiards::TABLE_STATE_VERSION,
+            geometry,
+            0,
+            vec![pwmtf_billiards::BallState::stationary(BallId::CUE, spot), {
+                let mut eight = pwmtf_billiards::BallState::stationary(
+                    BallId::new(8).unwrap(),
+                    pwmtf_billiards::Vector::ZERO,
+                );
+                eight.pocketed = true;
+                eight
+            }],
+        )
+        .unwrap();
+        let table = respot(&blocked, geometry, 8, spot).unwrap();
+        let eight = table.ball(BallId::new(8).unwrap()).unwrap();
+        assert!(!eight.pocketed);
+        assert_ne!(eight.position, spot);
+        let gap = eight.position.x.micros() - spot.x.micros();
+        let rise = eight.position.y.micros() - spot.y.micros();
+        let diameter = geometry.ball_radius().micros() * 2;
+        assert!(gap * gap + rise * rise >= diameter * diameter);
+        assert!(
+            gap.abs() + rise.abs() < diameter * 4,
+            "stays near the preferred spot"
+        );
+        // A spot inside a pocket's capture area is never chosen.
+        let corner = geometry.pocket_center(PocketId::TopRight);
+        let table = respot(&blocked, geometry, 8, corner).unwrap();
+        let moved = table.ball(BallId::new(8).unwrap()).unwrap().position;
+        let reach = geometry.pocket_radius().micros() + geometry.ball_radius().micros();
+        let (dx, dy) = (
+            moved.x.micros() - corner.x.micros(),
+            moved.y.micros() - corner.y.micros(),
+        );
+        assert!(i128::from(dx).pow(2) + i128::from(dy).pow(2) > i128::from(reach).pow(2));
+    }
+
+    #[test]
+    fn house_rules_round_trip_on_a_lounge_sized_table() {
+        // Cozy Lounge's 2.24 x 1.12 m table, 28 mm balls, 65 mm pockets.
+        let geometry = TableGeometry::new(
+            1,
+            pwmtf_billiards::Scalar::from_micros(1_120_000),
+            pwmtf_billiards::Scalar::from_micros(560_000),
+            pwmtf_billiards::Scalar::from_micros(28_000),
+            pwmtf_billiards::Scalar::from_micros(65_000),
+        )
+        .unwrap();
+        let mut game = MatchState::new(
+            RulesProfile::lounge(),
+            PhysicsProfile::standard(),
+            geometry,
+            RackSeed::new(7),
+            Player::Two,
+        )
+        .unwrap();
+        assert_eq!(game.rules().turn_duration_millis(), None);
+        game.apply_command(VersionedMatchCommand::new(MatchCommand::PlayShot {
+            shot: command(0, 9_000),
+            called_pocket: None,
+        }))
+        .unwrap();
+        assert_eq!(MatchState::from_bytes(&game.to_bytes()).unwrap(), game);
+        assert_eq!(
+            RulesProfile::new(LOUNGE_RULES_PROFILE_VERSION),
+            Ok(RulesProfile::lounge())
+        );
+        assert_eq!(
+            RulesProfile::new(3),
+            Err(RulesProfileError::UnsupportedVersion(3))
+        );
+    }
+
     #[test]
     fn timed_rerack_reports_the_simulated_shot_ticks() {
         let mut game = match_state();
@@ -1912,10 +2226,14 @@ mod tests {
 
     #[test]
     fn unknown_rules_versions_fail_closed() {
-        assert_eq!(RulesProfile::standard().turn_duration_millis(), 30_000);
         assert_eq!(
-            RulesProfile::new(2),
-            Err(RulesProfileError::UnsupportedVersion(2))
+            RulesProfile::standard().turn_duration_millis(),
+            Some(30_000)
+        );
+        assert_eq!(RulesProfile::lounge().turn_duration_millis(), None);
+        assert_eq!(
+            RulesProfile::new(9),
+            Err(RulesProfileError::UnsupportedVersion(9))
         );
     }
 }

@@ -828,7 +828,9 @@ impl HttpState {
                 revision: 0,
                 player: state.active_player(),
             },
-            due_at: DeadlineMillis::after_turn(DeadlineMillis::new(now), state.rules()),
+            // PWMTF only creates timed (standard-profile) matches.
+            due_at: DeadlineMillis::after_turn(DeadlineMillis::new(now), state.rules())
+                .ok_or(TransportError::Internal)?,
         };
         let match_id = MatchId::new(crate::http::random_u128()?);
         let started =
