@@ -9,7 +9,33 @@ const developmentSignIn = document.querySelector("#development-sign-in");
 const developmentUsername = document.querySelector("#development-username");
 const signOut = document.querySelector("#sign-out");
 const socialPanel = document.querySelector("#social-panel");
-socialPanel.open = new URLSearchParams(window.location.search).has("match");
+const accountSettings = document.querySelector("#account-settings");
+const accountSettingsLabel = document.querySelector("#account-settings-label");
+const handleSummary = document.querySelector("#handle-summary");
+const handleDisplay = document.querySelector("#handle-display");
+const incomingCard = document.querySelector("#incoming");
+const accountLobbies = document.querySelector("#account-lobbies");
+const invitationOutput = document.querySelector("#invitation-output");
+const invitationUrl = document.querySelector("#invitation-url");
+const copyInvitationButton = document.querySelector("#copy-invitation");
+const lobbySelf = document.querySelector("#lobby-self");
+const lobbySelfState = document.querySelector("#lobby-self-state");
+const lobbyOpponent = document.querySelector("#lobby-opponent");
+const lobbyOpponentName = document.querySelector("#lobby-opponent-name");
+const lobbyOpponentState = document.querySelector("#lobby-opponent-state");
+const playSheet = document.querySelector("#play-sheet");
+const settingsSheet = document.querySelector("#settings-sheet");
+const sheetBackdrop = document.querySelector("#sheet-backdrop");
+const openPlayButton = document.querySelector("#open-play");
+const openPlayLabel = document.querySelector("#open-play-label");
+const playBadge = document.querySelector("#play-badge");
+const openSettingsButton = document.querySelector("#open-settings");
+const matchHud = document.querySelector("#match-hud");
+const hudPlayers = document.querySelector("#hud-players");
+const hudTurn = document.querySelector("#hud-turn");
+const currentGameCard = document.querySelector("#current-game");
+const currentGameLabel = document.querySelector("#current-game-label");
+const rotateHintText = document.querySelector("#rotate-hint-text");
 const handleForm = document.querySelector("#handle-form");
 const handleInput = document.querySelector("#handle-input");
 const challengeForm = document.querySelector("#challenge-form");
@@ -202,20 +228,101 @@ shotControlMode.addEventListener("change", () => {
 applyShotControlMode();
 const spinSide = document.querySelector("#spin-side");
 const spinVertical = document.querySelector("#spin-vertical");
-const updateSpin = () => wasmModule?.set_cue_spin(Number(spinSide.value), Number(spinVertical.value));
-spinSide.addEventListener("input", updateSpin);
-spinVertical.addEventListener("input", updateSpin);
+const spinButton = document.querySelector("#spin-button");
+const spinButtonDot = document.querySelector("#spin-button-dot");
+const spinPopover = document.querySelector("#spin-popover");
+const spinPad = document.querySelector("#spin-pad");
+const spinPadDot = document.querySelector("#spin-pad-dot");
+const spinLabel = document.querySelector("#spin-label");
+
+function spinDescription(side, vertical) {
+  if (side === 0 && vertical === 0) {
+    return "Center hit";
+  }
+  const parts = [];
+  if (vertical !== 0) {
+    parts.push(`${vertical > 0 ? "Follow" : "Draw"} ${Math.abs(vertical)}%`);
+  }
+  if (side !== 0) {
+    parts.push(`${side > 0 ? "Right" : "Left"} ${Math.abs(side)}%`);
+  }
+  return parts.join(" · ");
+}
+
+// Side is positive to the right; vertical is positive for follow (top of ball).
+const updateSpin = () => {
+  const side = Number(spinSide.value);
+  const vertical = Number(spinVertical.value);
+  wasmModule?.set_cue_spin(side, vertical);
+  const left = `${50 + side * 0.38}%`;
+  const top = `${50 - vertical * 0.38}%`;
+  for (const dot of [spinPadDot, spinButtonDot]) {
+    dot.style.left = left;
+    dot.style.top = top;
+  }
+  const description = spinDescription(side, vertical);
+  spinLabel.textContent = description;
+  spinPad.setAttribute("aria-valuetext", description);
+};
+
+function setSpinFromPointer(event) {
+  const rect = spinPad.getBoundingClientRect();
+  let x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  let y = ((event.clientY - rect.top) / rect.height) * 2 - 1;
+  const length = Math.hypot(x, y);
+  if (length > 1) {
+    x /= length;
+    y /= length;
+  }
+  // Snap near the middle so a center hit is easy to select by touch.
+  const snap = (value) => (Math.abs(value) < 0.12 ? 0 : Math.round(value * 100));
+  spinSide.value = String(snap(x));
+  spinVertical.value = String(snap(-y));
+  updateSpin();
+}
+
+spinPad.addEventListener("pointerdown", (event) => {
+  spinPad.setPointerCapture(event.pointerId);
+  setSpinFromPointer(event);
+});
+spinPad.addEventListener("pointermove", (event) => {
+  if (spinPad.hasPointerCapture(event.pointerId)) {
+    setSpinFromPointer(event);
+  }
+});
+spinPad.addEventListener("keydown", (event) => {
+  const step = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, 10], ArrowDown: [0, -10] }[event.key];
+  if (step === undefined) {
+    return;
+  }
+  event.preventDefault();
+  const clamp = (value) => Math.max(-100, Math.min(100, value));
+  spinSide.value = String(clamp(Number(spinSide.value) + step[0]));
+  spinVertical.value = String(clamp(Number(spinVertical.value) + step[1]));
+  updateSpin();
+});
 document.querySelector("#reset-spin").addEventListener("click", () => {
   spinSide.value = "0";
   spinVertical.value = "0";
   updateSpin();
 });
+function setSpinPopover(open) {
+  spinPopover.hidden = !open;
+  spinButton.setAttribute("aria-expanded", String(open));
+}
+spinButton.addEventListener("click", () => setSpinPopover(spinPopover.hidden));
+document.addEventListener("pointerdown", (event) => {
+  if (!spinPopover.hidden && !spinPopover.contains(event.target) && !spinButton.contains(event.target)) {
+    setSpinPopover(false);
+  }
+});
+updateSpin();
 const fullscreenButton = document.querySelector("#fullscreen-table");
 fullscreenButton.hidden = !document.documentElement.requestFullscreen;
 fullscreenButton.addEventListener("click", async () => {
   try {
     await document.documentElement.requestFullscreen();
-    document.querySelector("#game-menu").open = false;
+    closeSheets();
   } catch {
     fullscreenButton.textContent = "Full screen unavailable";
   }
@@ -228,6 +335,12 @@ aimMode.addEventListener("change", () => {
   wasmModule?.set_aim_mode(Number(aimMode.value));
   savePresentationPreferences();
 });
+
+// Opponent handles keyed by match id, learned from the lobby list.
+const matchOpponents = new Map();
+let pendingIncoming = { challenges: 0, rematches: 0 };
+let lastToastedRejection = null;
+let opponentLookupFor = null;
 
 // Session state. The WASM transport owns the single `/ws` socket, retries,
 // pings, clock sync, subscriptions, and pending commands; this page only
@@ -451,7 +564,7 @@ function enterMatch(matchId, { push }) {
   currentMatchId = matchId;
   currentMatch = null;
   lastRejection = null;
-  socialPanel.open = true;
+  closeSheets();
   offerRematchButton.hidden = true;
   offerRematchButton.disabled = false;
   offerRematchButton.textContent = "Offer rematch";
@@ -499,6 +612,7 @@ function updateTurnTimer() {
   const remainingSeconds = Math.max(0, Math.ceil(remainingTurnMs(match) / 1_000));
   turnTimer.hidden = false;
   turnTimer.textContent = `${remainingSeconds}s`;
+  turnTimer.dataset.low = String(remainingSeconds <= 10);
   if (remainingSeconds === 0) {
     turnTimer.dataset.expired = "true";
   } else {
@@ -558,6 +672,11 @@ function writeMatchDataset(match) {
 }
 
 function renderMatchChrome() {
+  renderMatchStatus();
+  renderMatchHud();
+}
+
+function renderMatchStatus() {
   if (currentMatchId === null) {
     matchStatus.textContent = "";
     writeMatchDataset(null);
@@ -653,24 +772,178 @@ window.addEventListener("pageshow", updateSessionActivity);
 function renderLobbyList(lobbies) {
   lobbyList.replaceChildren();
   for (const lobby of lobbies) {
-    const row = document.createElement("div");
-    row.className = "social-row";
-    const label = document.createElement("span");
-    label.textContent = lobby.status === "started" ? "Started match" : "Waiting lobby";
-    const open = document.createElement("button");
-    open.type = "button";
-    open.textContent = "Open";
-    open.addEventListener("click", () => {
-      if (lobby.status === "started" && isDecimalId(lobby.match_id)) {
+    if (lobby.opponent_handle && isDecimalId(lobby.match_id ?? "")) {
+      matchOpponents.set(lobby.match_id, lobby.opponent_handle);
+    }
+  }
+  const visible = lobbies.filter(
+    (lobby) =>
+      lobby.status === "waiting" ||
+      (lobby.status === "started" && lobby.match_in_progress !== false),
+  );
+  for (const lobby of visible) {
+    const started = lobby.status === "started" && isDecimalId(lobby.match_id ?? "");
+    const current = started && lobby.match_id === currentMatchId;
+    const open = listButton(current ? "Playing" : started ? "Resume" : "Open", "secondary", () => {
+      if (started) {
         enterMatch(lobby.match_id, { push: true });
       } else {
         enterLobby(lobby);
       }
     });
-    row.append(label, open);
-    lobbyList.append(row);
+    open.disabled = current || (!started && String(lobby.lobby_id) === activeLobbyId);
+    lobbyList.append(
+      listItem(
+        `vs ${opponentName(lobby.opponent_handle)}`,
+        started ? "Game in progress" : "Waiting in lobby",
+        open,
+      ),
+    );
   }
+  accountLobbies.hidden = visible.length === 0;
+  renderMatchHud();
 }
+
+function opponentName(handle) {
+  return handle ? `@${handle}` : "your friend";
+}
+
+function listItem(title, subtitle, ...actions) {
+  const row = document.createElement("div");
+  row.className = "list-item";
+  const text = document.createElement("span");
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const small = document.createElement("small");
+  small.textContent = subtitle;
+  text.append(strong, small);
+  row.append(text, ...actions);
+  return row;
+}
+
+function listButton(label, className, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.addEventListener("click", () => onClick(button));
+  return button;
+}
+
+function renderPlayBadge() {
+  const count = pendingIncoming.challenges + pendingIncoming.rematches;
+  playBadge.hidden = count === 0;
+  playBadge.textContent = String(count);
+  incomingCard.hidden = count === 0;
+}
+
+function shortRejection(reason) {
+  return reason === "wrong-turn" ? "Not your turn" : "Move not accepted";
+}
+
+function renderMatchHud() {
+  const inMatch = currentMatchId !== null;
+  currentGameCard.hidden = !inMatch;
+  openPlayLabel.textContent = inMatch ? "Friends" : "Play friends";
+  if (!inMatch) {
+    rotateHintText.textContent = "Turn your phone sideways to practice.";
+    hudPlayers.textContent = "";
+    hudTurn.textContent = "Practice table";
+    matchHud.dataset.tone = "";
+    return;
+  }
+  const opponent = matchOpponents.get(currentMatchId);
+  if (opponent === undefined && signedIn && opponentLookupFor !== currentMatchId) {
+    // A just-started match may not be in the last lobby list yet.
+    opponentLookupFor = currentMatchId;
+    void refreshSocialState();
+  }
+  const name = opponent ? `@${opponent}` : "Opponent";
+  hudPlayers.textContent = `You vs ${name}`;
+  currentGameLabel.textContent = `Playing ${opponentName(opponent)}.`;
+  rotateHintText.textContent = `Your game vs ${opponentName(opponent)} is on. Turn your phone sideways to play.`;
+  const match = currentMatch;
+  let text;
+  let tone = "";
+  if (matchStatus.dataset.denied === "true") {
+    text = "Not your match";
+    tone = "warn";
+  } else if (!signedIn) {
+    text = "Sign in to play";
+  } else if (match === null || connectionStatus !== "ready" || !sessionActive) {
+    text = connectionStatus === "reconnecting" ? "Reconnecting…" : "Connecting…";
+    tone = connectionStatus === "reconnecting" ? "warn" : "";
+  } else if (match.winner !== 0) {
+    text = match.winner === match.seat ? "You won" : "You lost";
+  } else if (lastRejection !== null) {
+    text = shortRejection(lastRejection);
+    tone = "warn";
+  } else if (match.pending) {
+    text = "Sending shot…";
+  } else if (match.playing) {
+    text = "Shot in progress";
+  } else if (match.active_player === match.seat) {
+    text = match.ball_in_hand ? "Your turn · ball in hand" : "Your turn";
+    tone = "you";
+  } else {
+    text = `${name}'s turn`;
+  }
+  hudTurn.textContent = text;
+  matchHud.dataset.tone = tone;
+  if (lastRejection !== null && lastRejection !== lastToastedRejection) {
+    socialStatus.textContent = REJECTION_MESSAGES[lastRejection];
+  }
+  lastToastedRejection = lastRejection;
+}
+
+// ---------- Sheets ----------
+
+function closeSheets() {
+  playSheet.hidden = true;
+  settingsSheet.hidden = true;
+  sheetBackdrop.hidden = true;
+  openPlayButton.setAttribute("aria-expanded", "false");
+  openSettingsButton.setAttribute("aria-expanded", "false");
+}
+
+function openSheet(name) {
+  const play = name === "play";
+  // Never leave a half-drawn shot behind a sheet.
+  wasmModule?.interrupt_match_gesture();
+  setSpinPopover(false);
+  playSheet.hidden = !play;
+  settingsSheet.hidden = play;
+  sheetBackdrop.hidden = false;
+  openPlayButton.setAttribute("aria-expanded", String(play));
+  openSettingsButton.setAttribute("aria-expanded", String(!play));
+}
+
+openPlayButton.addEventListener("click", () => openSheet("play"));
+openSettingsButton.addEventListener("click", () => openSheet("settings"));
+document.querySelector("#open-settings-inline").addEventListener("click", () => openSheet("settings"));
+sheetBackdrop.addEventListener("click", closeSheets);
+for (const button of document.querySelectorAll("[data-close-sheet]")) {
+  button.addEventListener("click", closeSheets);
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeSheets();
+    setSpinPopover(false);
+  }
+});
+
+// Toasts clear themselves however their text was set.
+let toastTimer = null;
+new MutationObserver(() => {
+  window.clearTimeout(toastTimer);
+  if (socialStatus.textContent !== "") {
+    toastTimer = window.setTimeout(() => {
+      socialStatus.textContent = "";
+    }, 4_500);
+  }
+}).observe(socialStatus, { childList: true, characterData: true, subtree: true });
+
+// ---------- Social state ----------
 
 async function refreshSocialState() {
   if (!signedIn) {
@@ -706,19 +979,36 @@ async function refreshSocialState() {
   }
 }
 
+function renderSignedOut() {
+  signedIn = false;
+  accountPanel.hidden = false;
+  googleSignIn.hidden = !runtimeAuth.google_login;
+  developmentSignIn.hidden = !runtimeAuth.development_login;
+  socialPanel.hidden = true;
+  accountSettings.hidden = true;
+  pendingIncoming = { challenges: 0, rematches: 0 };
+  renderPlayBadge();
+}
+
+function renderHandle(handle) {
+  const hasHandle = typeof handle === "string" && handle !== "";
+  handleSummary.hidden = !hasHandle;
+  handleForm.hidden = hasHandle;
+  handleDisplay.textContent = hasHandle ? `@${handle}` : "";
+  accountSettingsLabel.textContent = hasHandle ? `Signed in as @${handle}` : "Signed in · no player name yet";
+  // Challenges and invitations need a public name first.
+  document.querySelector("#start-game").hidden = !hasHandle;
+}
+
 async function refreshSession() {
   const response = await fetch("/api/session", {
     credentials: "same-origin",
     headers: { Accept: "application/json" },
   });
-  accountPanel.hidden = false;
   if (response.status === 401) {
-    accountLabel.textContent = "Play online with friends";
-    googleSignIn.hidden = !runtimeAuth.google_login;
-    developmentSignIn.hidden = !runtimeAuth.development_login;
-    signOut.hidden = true;
-    socialPanel.hidden = true;
-    signedIn = false;
+    accountLabel.textContent =
+      "Sign in to challenge friends online. Practice works without an account.";
+    renderSignedOut();
     updateSessionActivity();
     renderMatchChrome();
     return undefined;
@@ -727,16 +1017,22 @@ async function refreshSession() {
     throw new Error(`session request failed with ${response.status}`);
   }
   const session = await response.json();
-  accountLabel.textContent = session.handle ? `Signed in as @${session.handle}` : "Signed in";
-  handleInput.value = session.handle ?? "";
-  googleSignIn.hidden = true;
-  developmentSignIn.hidden = true;
-  signOut.hidden = false;
+  accountPanel.hidden = true;
   socialPanel.hidden = false;
+  accountSettings.hidden = false;
+  renderHandle(session.handle);
   signedIn = true;
   ensureSession();
   await refreshSocialState();
+  renderMatchChrome();
   return session;
+}
+
+class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
 }
 
 function apiRequest(path, options = {}) {
@@ -754,37 +1050,93 @@ function apiRequest(path, options = {}) {
   }).then(async (response) => {
     if (!response.ok) {
       const message = await response.text();
-      throw new Error(message || `request failed with ${response.status}`);
+      throw new ApiError(response.status, message || `request failed with ${response.status}`);
     }
     return response.status === 204 ? null : response.json();
   });
 }
 
-function socialFailure(error) {
+const HANDLE_PATTERN = /^[a-z][a-z0-9_]{2,23}$/u;
+const HANDLE_RULES = "Use 3–24 lowercase letters, numbers or _, starting with a letter.";
+
+// Turns server status codes into something a player can act on.
+function friendlyError(error, specific = {}) {
+  const status = error instanceof ApiError ? error.status : 0;
+  if (Object.hasOwn(specific, status)) {
+    return specific[status];
+  }
+  switch (status) {
+    case 0:
+      return navigator.onLine ? "Could not reach the server. Try again." : "You are offline.";
+    case 401:
+      return "Your sign-in expired. Sign in again.";
+    case 403:
+      return "That is not allowed.";
+    case 404:
+      return "That no longer exists. Refresh and try again.";
+    case 409:
+      return "That conflicts with the current state. Refresh and try again.";
+    default:
+      return status >= 500 ? "The server had a problem. Try again in a moment." : "Something went wrong. Try again.";
+  }
+}
+
+function socialFailure(error, specific) {
   console.error("PWMTF social operation failed", error);
-  socialStatus.textContent = error instanceof Error ? error.message : "Operation failed";
+  socialStatus.textContent = friendlyError(error, specific);
+}
+
+function normalizeHandleInput(input) {
+  input.addEventListener("input", () => {
+    const normalized = input.value.toLowerCase().replace(/[^a-z0-9_]/gu, "");
+    if (normalized !== input.value) {
+      input.value = normalized;
+    }
+  });
+}
+normalizeHandleInput(handleInput);
+normalizeHandleInput(challengeHandle);
+normalizeHandleInput(developmentUsername);
+
+// ---------- Lobby ----------
+
+function describePresence(present, ready) {
+  if (ready) {
+    return ["ready", "Ready"];
+  }
+  return present ? ["present", "Here"] : ["away", "Not here yet"];
 }
 
 function renderLobbyState(lobby) {
+  const opponent = opponentName(lobby.opponent_handle);
+  lobbyLabel.textContent = lobby.opponent_handle ? `Game with @${lobby.opponent_handle}` : "Game lobby";
+  lobbyOpponentName.textContent = lobby.opponent_handle ? `@${lobby.opponent_handle}` : "Friend";
   if (lobby.status !== "waiting") {
-    lobbyState.textContent = lobby.status;
+    lobbyState.textContent = lobby.status === "cancelled" ? "This lobby was closed." : "Starting…";
     return;
   }
+  const [selfState, selfText] = describePresence(lobby.self_present, lobby.self_ready);
+  const [opponentState, opponentText] = describePresence(lobby.opponent_present, lobby.opponent_ready);
+  lobbySelf.dataset.state = selfState;
+  lobbySelfState.textContent = lobby.self_present ? selfText : "Connecting…";
+  lobbyOpponent.dataset.state = opponentState;
+  lobbyOpponentState.textContent = opponentText;
   // Readiness belongs to a live presence, so a reconnect clears it; the Ready
   // button follows the server's view rather than the last click.
   readyLobbyButton.disabled = lobby.self_ready === true || lobby.self_present !== true;
+  readyLobbyButton.textContent = lobby.self_ready ? "Ready ✓" : "I'm ready";
   if (lobby.both_ready) {
-    lobbyState.textContent = "Both players ready. Starting match…";
+    lobbyState.textContent = "Both ready. Starting the game…";
   } else if (lobby.self_ready) {
     lobbyState.textContent = lobby.opponent_present
-      ? "Ready. Waiting for your friend to ready up."
-      : "Ready. Waiting for your friend to join.";
+      ? `Waiting for ${opponent} to press ready.`
+      : `Waiting for ${opponent} to open the game.`;
   } else if (!lobby.self_present) {
     lobbyState.textContent = "Connecting to the lobby…";
   } else {
     lobbyState.textContent = lobby.opponent_present
-      ? `Your friend is here${lobby.opponent_ready ? " and ready" : ""}. Press Ready.`
-      : "Waiting for your friend. Press Ready when you are set.";
+      ? `${opponent} is here${lobby.opponent_ready ? " and ready" : ""}. Press ready to start.`
+      : `Press ready. The game starts when ${opponent} is here and ready too.`;
   }
 }
 
@@ -794,8 +1146,6 @@ function clearLobby() {
   }
   activeLobbyId = null;
   lobbyPanel.hidden = true;
-  cancelLobbyButton.hidden = true;
-  readyLobbyButton.hidden = true;
 }
 
 function handleLobbyRecord(lobby) {
@@ -804,6 +1154,9 @@ function handleLobbyRecord(lobby) {
   }
   renderLobbyState(lobby);
   if (lobby.status === "started" && isDecimalId(lobby.match_id)) {
+    if (lobby.opponent_handle) {
+      matchOpponents.set(lobby.match_id, lobby.opponent_handle);
+    }
     onMatchStarted(activeLobbyId, lobby.match_id);
   } else if (lobby.status === "cancelled") {
     clearLobby();
@@ -823,7 +1176,6 @@ async function refreshLobby() {
 }
 
 function enterLobby(lobby) {
-  socialPanel.open = true;
   const nextLobbyId = String(lobby.lobby_id);
   if (!isDecimalId(nextLobbyId) || activeLobbyId === nextLobbyId) {
     return;
@@ -833,12 +1185,17 @@ function enterLobby(lobby) {
   }
   activeLobbyId = nextLobbyId;
   lobbyPanel.hidden = false;
-  lobbyLabel.textContent = `Lobby ${nextLobbyId}`;
-  lobbyState.textContent = "Waiting for both players";
-  cancelLobbyButton.hidden = false;
-  readyLobbyButton.hidden = false;
-  readyLobbyButton.disabled = false;
-  socialStatus.textContent = `Joined waiting lobby ${nextLobbyId}.`;
+  lobbySelf.dataset.state = "away";
+  lobbyOpponent.dataset.state = "away";
+  lobbySelfState.textContent = "Connecting…";
+  lobbyOpponentState.textContent = "";
+  lobbyState.textContent = "Connecting to the lobby…";
+  readyLobbyButton.disabled = true;
+  readyLobbyButton.textContent = "I'm ready";
+  if (lobby.opponent_handle !== undefined) {
+    renderLobbyState({ ...lobby, status: "waiting" });
+  }
+  openSheet("play");
   // The live lobby subscription is this tab's presence.
   wasmModule?.subscribe_lobby(nextLobbyId);
   void refreshLobby();
@@ -854,7 +1211,7 @@ readyLobbyButton.addEventListener("click", async () => {
     handleLobbyRecord(lobby);
   } catch (error) {
     readyLobbyButton.disabled = false;
-    socialFailure(error);
+    socialFailure(error, { 409: "Still connecting to the lobby. Try again in a moment." });
   }
 });
 
@@ -862,47 +1219,52 @@ cancelLobbyButton.addEventListener("click", async () => {
   if (activeLobbyId === null) {
     return;
   }
+  if (!window.confirm("Leave this lobby? Your friend will need a new invitation.")) {
+    return;
+  }
   try {
-    const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}`, { method: "DELETE" });
-    lobbyState.textContent = lobby.status;
+    await apiRequest(`/api/lobbies/${activeLobbyId}`, { method: "DELETE" });
     clearLobby();
+    socialStatus.textContent = "Lobby closed.";
+    void refreshSocialState();
   } catch (error) {
     socialFailure(error);
   }
 });
 
-async function acceptRematch(matchId) {
-  socialStatus.textContent = "Accepting rematch…";
+// ---------- Rematches ----------
+
+async function acceptRematch(matchId, fromHandle, button) {
+  button.disabled = true;
   try {
     const match = await apiRequest(`/api/matches/${matchId}/rematch/accept`, { method: "POST" });
-    socialStatus.textContent = "";
     const nextMatchId = String(match.match_id);
+    if (fromHandle) {
+      matchOpponents.set(nextMatchId, fromHandle);
+    }
     // The `match-started` push may already have entered this match.
     if (nextMatchId !== currentMatchId) {
       enterMatch(nextMatchId, { push: true });
     }
   } catch (error) {
-    socialFailure(error);
+    button.disabled = false;
+    socialFailure(error, { 409: "That rematch is no longer available." });
   }
 }
 
 function renderRematches(rematches) {
   rematchList.replaceChildren();
-  if (rematches.length === 0) {
-    rematchList.textContent = "No rematch offers.";
-    return;
-  }
+  pendingIncoming.rematches = rematches.length;
   for (const rematch of rematches) {
-    const row = document.createElement("div");
-    const label = document.createElement("span");
-    label.textContent = `Match ${rematch.previous_match_id}`;
-    const accept = document.createElement("button");
-    accept.type = "button";
-    accept.textContent = "Accept";
-    accept.addEventListener("click", () => void acceptRematch(rematch.previous_match_id));
-    row.append(label, accept);
-    rematchList.append(row);
+    rematchList.append(
+      listItem(
+        rematch.from_handle ? `@${rematch.from_handle}` : "Your opponent",
+        "Wants a rematch",
+        listButton("Accept", "primary", (button) => void acceptRematch(rematch.previous_match_id, rematch.from_handle, button)),
+      ),
+    );
   }
+  renderPlayBadge();
 }
 
 async function offerRematch(matchId) {
@@ -910,7 +1272,7 @@ async function offerRematch(matchId) {
   try {
     await apiRequest(`/api/matches/${matchId}/rematch`, { method: "POST" });
     offerRematchButton.textContent = "Rematch offered";
-    socialStatus.textContent = "Rematch offered.";
+    socialStatus.textContent = "Rematch offered. It starts when your opponent accepts.";
   } catch (error) {
     offerRematchButton.disabled = false;
     throw error;
@@ -919,22 +1281,25 @@ async function offerRematch(matchId) {
 
 offerRematchButton.addEventListener("click", () => {
   if (currentMatchId !== null) {
-    void offerRematch(currentMatchId).catch(socialFailure);
+    void offerRematch(currentMatchId).catch((error) =>
+      socialFailure(error, { 409: "A rematch was already offered for this game." }),
+    );
   }
 });
+
+// ---------- Challenges ----------
 
 async function acceptChallenge(challengeId, button) {
   if (button.disabled) {
     return;
   }
   button.disabled = true;
-  socialStatus.textContent = "Accepting challenge…";
   try {
     const lobby = await apiRequest(`/api/challenges/${challengeId}/accept`, { method: "POST" });
     enterLobby(lobby);
     await refreshSocialState();
   } catch (error) {
-    socialFailure(error);
+    socialFailure(error, { 404: "That challenge is no longer available." });
   } finally {
     button.disabled = false;
   }
@@ -942,86 +1307,169 @@ async function acceptChallenge(challengeId, button) {
 
 function renderChallenges(challenges) {
   challengeList.replaceChildren();
-  if (challenges.length === 0) {
-    challengeList.textContent = "No incoming challenges.";
-    return;
-  }
+  pendingIncoming.challenges = challenges.length;
   for (const challenge of challenges) {
-    const row = document.createElement("div");
-    const label = document.createElement("span");
-    label.textContent = `@${challenge.from_handle}`;
-    const accept = document.createElement("button");
-    accept.type = "button";
-    accept.textContent = "Accept";
-    accept.addEventListener("click", () => void acceptChallenge(challenge.challenge_id, accept));
-    row.append(label, accept);
-    challengeList.append(row);
+    challengeList.append(
+      listItem(
+        `@${challenge.from_handle}`,
+        "Challenged you",
+        listButton("Accept", "primary", (button) => void acceptChallenge(challenge.challenge_id, button)),
+      ),
+    );
   }
+  renderPlayBadge();
 }
 
 handleForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  socialStatus.textContent = "Saving handle…";
+  const handle = handleInput.value.trim().toLowerCase();
+  if (!HANDLE_PATTERN.test(handle)) {
+    socialStatus.textContent = HANDLE_RULES;
+    handleInput.focus();
+    return;
+  }
+  const button = handleForm.querySelector("button");
+  button.disabled = true;
   try {
     const profile = await apiRequest("/api/profile/handle", {
       method: "PUT",
-      body: JSON.stringify({ handle: handleInput.value.trim() }),
+      body: JSON.stringify({ handle }),
     });
-    accountLabel.textContent = `Signed in as @${profile.handle}`;
-    socialStatus.textContent = `Handle @${profile.handle} saved.`;
+    renderHandle(profile.handle);
+    socialStatus.textContent = `You're @${profile.handle}. Invite a friend to play!`;
   } catch (error) {
-    socialFailure(error);
+    socialFailure(error, {
+      400: HANDLE_RULES,
+      409: `@${handle} is taken, or your account already has a name.`,
+    });
+  } finally {
+    button.disabled = false;
   }
 });
 
 challengeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  socialStatus.textContent = "Creating challenge…";
+  const handle = challengeHandle.value.trim().toLowerCase();
+  if (!HANDLE_PATTERN.test(handle)) {
+    socialStatus.textContent = `Player names: ${HANDLE_RULES.toLowerCase()}`;
+    challengeHandle.focus();
+    return;
+  }
+  if (handleDisplay.textContent === `@${handle}`) {
+    socialStatus.textContent = "You can't challenge yourself. Invite a friend with a link instead.";
+    return;
+  }
+  const button = challengeForm.querySelector("button");
+  button.disabled = true;
   try {
-    const challenge = await apiRequest("/api/challenges", {
+    await apiRequest("/api/challenges", {
       method: "POST",
-      body: JSON.stringify({ handle: challengeHandle.value.trim() }),
+      body: JSON.stringify({ handle }),
     });
-    socialStatus.textContent = `Challenge ${challenge.challenge_id} is waiting for acceptance.`;
+    challengeHandle.value = "";
+    socialStatus.textContent = `Challenge sent to @${handle}. The lobby opens when they accept.`;
   } catch (error) {
-    socialFailure(error);
+    socialFailure(error, {
+      400: "You can't challenge yourself.",
+      404: `No player named @${handle}. Check the spelling.`,
+      409: `You already challenged @${handle}.`,
+    });
+  } finally {
+    button.disabled = false;
   }
 });
 
-async function copyInvitation(value) {
+// ---------- Invitations ----------
+
+async function copyText(value) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
-    return "Private invitation copied to the clipboard.";
+    return true;
   }
-  return `Private invitation: ${value}`;
+  invitationUrl.select();
+  return false;
 }
 
 createInvitationButton.addEventListener("click", async () => {
-  socialStatus.textContent = "Creating invitation…";
+  createInvitationButton.disabled = true;
   try {
     const invitation = await apiRequest("/api/invitations", { method: "POST" });
-    socialStatus.textContent = await copyInvitation(invitation.invitation_url);
+    const url = invitation.invitation_url;
+    invitationUrl.value = url;
+    invitationOutput.hidden = false;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: "Pool with More Than Friends", text: "Play 8-ball with me!", url });
+        socialStatus.textContent = "Invitation sent. The lobby opens when your friend joins.";
+        return;
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          return;
+        }
+      }
+    }
+    socialStatus.textContent = (await copyText(url).catch(() => false))
+      ? "Link copied. Send it to a friend; it works once."
+      : "Copy the link below and send it to a friend.";
   } catch (error) {
     socialFailure(error);
+  } finally {
+    createInvitationButton.disabled = false;
   }
 });
 
+copyInvitationButton.addEventListener("click", async () => {
+  socialStatus.textContent = (await copyText(invitationUrl.value).catch(() => false))
+    ? "Link copied."
+    : "Select the link and copy it.";
+});
+
+const PENDING_INVITE_KEY = "pwmtf.pending-invite";
+
 async function redeemInvitationFromUrl() {
-  const token = new URLSearchParams(window.location.search).get("invite");
-  if (token === null) {
+  const url = new URL(window.location.href);
+  let token = url.searchParams.get("invite");
+  if (token !== null) {
+    url.searchParams.delete("invite");
+    window.history.replaceState(window.history.state, "", url);
+  } else {
+    try {
+      token = window.sessionStorage.getItem(PENDING_INVITE_KEY);
+    } catch {
+      token = null;
+    }
+  }
+  if (token === null || token.length > 256) {
     return;
+  }
+  if (!signedIn) {
+    // Keep the invitation across the Google sign-in round trip.
+    try {
+      window.sessionStorage.setItem(PENDING_INVITE_KEY, token);
+    } catch {
+      // Without storage the friend can open the link again after signing in.
+    }
+    accountLabel.textContent = "Your friend invited you to a game. Sign in to join.";
+    openSheet("play");
+    return;
+  }
+  try {
+    window.sessionStorage.removeItem(PENDING_INVITE_KEY);
+  } catch {
+    // Ignore unavailable storage.
   }
   try {
     const lobby = await apiRequest("/api/invitations/redeem", {
       method: "POST",
       body: JSON.stringify({ token }),
     });
-    const url = new URL(window.location.href);
-    url.searchParams.delete("invite");
-    window.history.replaceState(null, "", url);
     enterLobby(lobby);
   } catch (error) {
-    socialFailure(error);
+    socialFailure(error, {
+      400: "That invitation link is not valid, or it is your own link. Send it to a friend.",
+      409: "That invitation link has expired or was already used. Ask for a new one.",
+      404: "That invitation link is not valid. Ask for a new one.",
+    });
   }
 }
 
@@ -1079,10 +1527,11 @@ signOut.addEventListener("click", async () => {
     if (!response.ok) {
       throw new Error(`sign out failed with ${response.status}`);
     }
+    closeSheets();
     await refreshSession();
   } catch (error) {
     console.error("PWMTF sign out failed", error);
-    accountLabel.textContent = "Sign out failed. Try again.";
+    socialStatus.textContent = "Sign out failed. Try again.";
   } finally {
     signOut.disabled = false;
   }
@@ -1106,10 +1555,8 @@ const sessionReady = runtimeAuthReady.then(() => refreshSession())
   })
   .catch((error) => {
     console.error("PWMTF session lookup failed", error);
-    accountPanel.hidden = false;
-    accountLabel.textContent = "Account status unavailable";
-    googleSignIn.hidden = !runtimeAuth.google_login;
-    developmentSignIn.hidden = !runtimeAuth.development_login;
+    renderSignedOut();
+    accountLabel.textContent = "Could not check your account. Practice still works; reload to try again.";
     return undefined;
   });
 

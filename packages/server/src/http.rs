@@ -1122,6 +1122,10 @@ struct LobbyStatusResponse {
     self_ready: bool,
     opponent_present: bool,
     opponent_ready: bool,
+    /// Opponent's public handle, when one has been chosen.
+    opponent_handle: Option<String>,
+    /// Whether a started lobby's match is still in progress.
+    match_in_progress: Option<bool>,
 }
 
 /// Live presence/readiness of one waiting lobby, from the requester's seat.
@@ -1163,6 +1167,33 @@ impl HttpState {
             opponent_ready,
         })
     }
+
+    /// Builds the requester's complete view of one lobby: liveness, the
+    /// opponent's public handle, and whether its match is still live.
+    async fn describe_lobby(
+        &self,
+        record: crate::LobbyRecord,
+        actor: AccountId,
+        liveness: Option<LobbyLiveness>,
+    ) -> Result<LobbyStatusResponse, TransportError> {
+        let liveness = match liveness {
+            Some(liveness) => liveness,
+            None => self.lobby_liveness(record, actor).await?,
+        };
+        let opponent = if actor == record.participants.player_one {
+            record.participants.player_two
+        } else {
+            record.participants.player_one
+        };
+        let mut response = lobby_status_response(record, liveness);
+        response.opponent_handle = handle_for_account(&*self.db, opponent)
+            .await?
+            .map(|handle| handle.as_str().to_owned());
+        if let crate::LobbyStatus::Started { match_id } = record.status {
+            response.match_in_progress = self.hub.unit(match_id).map(|unit| unit.in_progress());
+        }
+        Ok(response)
+    }
 }
 
 async fn list_account_lobbies(
@@ -1173,8 +1204,7 @@ async fn list_account_lobbies(
     let records = lobbies_for_account(&*state.db, actor).await?;
     let mut response = Vec::with_capacity(records.len());
     for record in records {
-        let liveness = state.lobby_liveness(record, actor).await?;
-        response.push(lobby_status_response(record, liveness));
+        response.push(state.describe_lobby(record, actor, None).await?);
     }
     Ok(axum::Json(response))
 }
@@ -1246,6 +1276,7 @@ async fn match_access(
 #[derive(Debug, serde::Serialize)]
 struct PendingRematchResponse {
     previous_match_id: String,
+    from_handle: Option<String>,
 }
 
 async fn list_pending_rematches(
@@ -1254,14 +1285,16 @@ async fn list_pending_rematches(
 ) -> Result<axum::Json<Vec<PendingRematchResponse>>, TransportError> {
     let actor = authenticated_account(&state, &headers).await?;
     let pending = pending_rematches_for(&*state.db, actor).await?;
-    Ok(axum::Json(
-        pending
-            .into_iter()
-            .map(|offer| PendingRematchResponse {
-                previous_match_id: offer.previous_match_id.value().to_string(),
-            })
-            .collect(),
-    ))
+    let mut response = Vec::with_capacity(pending.len());
+    for offer in pending {
+        response.push(PendingRematchResponse {
+            previous_match_id: offer.previous_match_id.value().to_string(),
+            from_handle: handle_for_account(&*state.db, offer.offered_by)
+                .await?
+                .map(|handle| handle.as_str().to_owned()),
+        });
+    }
+    Ok(axum::Json(response))
 }
 
 async fn create_rematch_offer(
@@ -1318,6 +1351,8 @@ async fn accept_rematch_offer(
         self_ready: false,
         opponent_present: false,
         opponent_ready: false,
+        opponent_handle: None,
+        match_in_progress: Some(true),
     }))
 }
 
@@ -1331,8 +1366,7 @@ async fn lobby_status(
         .await?
         .ok_or(TransportError::SocialNotFound)?;
     authorize_lobby_member(record.participants, actor)?;
-    let liveness = state.lobby_liveness(record, actor).await?;
-    Ok(axum::Json(lobby_status_response(record, liveness)))
+    Ok(axum::Json(state.describe_lobby(record, actor, None).await?))
 }
 
 /// Records explicit readiness. The actor must hold a live lobby presence
@@ -1348,8 +1382,7 @@ async fn ready_waiting_lobby(
     let record = state
         .ready_lobby_member(LobbyId::new(lobby_id), actor)
         .await?;
-    let liveness = state.lobby_liveness(record, actor).await?;
-    Ok(axum::Json(lobby_status_response(record, liveness)))
+    Ok(axum::Json(state.describe_lobby(record, actor, None).await?))
 }
 
 async fn cancel_waiting_lobby(
@@ -1366,10 +1399,11 @@ async fn cancel_waiting_lobby(
         record.participants.player_one,
         record.participants.player_two,
     ]);
-    Ok(axum::Json(lobby_status_response(
-        record,
-        LobbyLiveness::default(),
-    )))
+    Ok(axum::Json(
+        state
+            .describe_lobby(record, actor, Some(LobbyLiveness::default()))
+            .await?,
+    ))
 }
 
 fn authorize_lobby_member(
@@ -1401,6 +1435,8 @@ fn lobby_status_response(
         self_ready: liveness.self_ready,
         opponent_present: liveness.opponent_present,
         opponent_ready: liveness.opponent_ready,
+        opponent_handle: None,
+        match_in_progress: None,
     }
 }
 

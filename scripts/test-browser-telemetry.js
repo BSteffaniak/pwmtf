@@ -1527,7 +1527,10 @@ const chromeContext = {
   clearLobby() {
     chromeCalls.push(["clearLobby"]);
   },
-  socialPanel: { open: false },
+  renderMatchHud() {},
+  closeSheets() {
+    chromeCalls.push(["closeSheets"]);
+  },
   socialStatus: { textContent: "" },
   matchStatus: chromeElement(),
   concedeMatchButton: chromeElement(),

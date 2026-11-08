@@ -23,105 +23,195 @@
   </head>
   <body>
     <main id="game-shell" aria-label="Pool with More Than Friends" data-client-state="loading">
-      <header id="brand-lockup" aria-label="Pool with More Than Friends">
-        <span class="brand-mark" aria-hidden="true"><i></i><b>8</b><i></i></span>
-        <span class="brand-name">Pool <small>with more than</small> Friends</span>
-      </header>
-      <details id="game-menu">
-        <summary>Menu &amp; settings</summary>
-        <section id="install-app" hidden>
-          <strong>Install Pool Friends</strong>
-          <p id="install-app-hint"></p>
-          <button id="install-app-button" type="button" hidden>Install app</button>
-        </section>
-      <section id="account-panel" hidden>
-        <span id="account-label"></span>
-        <form id="google-sign-in" method="post" action="/auth/google/start">
-          <button type="submit">Sign in with Google</button>
-        </form>
-        <form id="development-sign-in" hidden>
-          <label for="development-username">Local username</label>
-          <input id="development-username" name="username" type="text" minlength="3" maxlength="24" pattern="[a-z][a-z0-9_]{2,23}" autocomplete="username" required />
-          <button type="submit">Sign in locally</button>
-        </form>
-        <button id="sign-out" type="button" hidden>Sign out</button>
-      </section>
-      <details id="social-panel" hidden>
-        <summary>Play with friends</summary>
-        <form id="handle-form">
-          <label>
-            Your handle
-            <input id="handle-input" type="text" minlength="3" maxlength="24" autocomplete="off" />
-          </label>
-          <button type="submit">Save handle</button>
-        </form>
-        <form id="challenge-form">
-          <label>
-            Friend's exact handle
-            <input id="challenge-handle" type="text" minlength="3" maxlength="24" autocomplete="off" />
-          </label>
-          <button type="submit">Challenge</button>
-        </form>
-        <section id="incoming-challenges">
-          <strong>Incoming challenges</strong>
-          <div id="challenge-list"></div>
-        </section>
-        <section id="incoming-rematches">
-          <strong>Rematch offers</strong>
-          <div id="rematch-list"></div>
-        </section>
-        <section id="account-lobbies">
-          <strong>Your lobbies</strong>
-          <div id="lobby-list"></div>
-        </section>
-        <button id="offer-rematch" type="button" hidden>Offer rematch</button>
-        <button id="concede-match" type="button" hidden>Concede match</button>
-        <output id="match-status" role="status" aria-live="polite"></output>
-        <output id="turn-timer" aria-label="Turn time remaining" hidden></output>
-        <section id="match-result" role="status" aria-live="polite" hidden>
-          <strong id="match-result-title"></strong>
-          <span id="match-result-detail"></span>
-        </section>
-        <button id="create-invitation" type="button">Create private invitation</button>
-        <section id="lobby-panel" hidden>
-          <strong id="lobby-label"></strong>
-          <span id="lobby-state"></span>
-          <button id="ready-lobby" type="button">Ready</button>
-          <button id="cancel-lobby" type="button">Cancel lobby</button>
-        </section>
-        <output id="social-status" role="status" aria-live="polite"></output>
-      </details>
-      <label id="shot-control-mode-control">Shot controls
-        <select id="shot-control-mode" aria-label="Shot control mode">
-          <option value="1" selected>Aim + power bar</option>
-          <option value="0">Combined drag</option>
-        </select>
-      </label>
-      <label id="aim-mode-control">Aim guide
-        <select id="aim-mode" aria-label="Aim guide mode">
-          <option value="1">Short (physics-accurate)</option>
-          <option value="0">Simple (geometric)</option>
-          <option value="2">Full (3-second physics preview)</option>
-        </select>
-        <input id="unlimited-aim-range" type="checkbox" aria-label="Unlimited projection range" /> Unlimited projection range
-      </label>
-      <fieldset id="spin-controls">
-        <legend>Cue spin</legend>
-        <label>Left / right <input id="spin-side" type="range" min="-100" max="100" value="0" /></label>
-        <label>Draw / follow <input id="spin-vertical" type="range" min="-100" max="100" value="0" /></label>
-        <button id="reset-spin" type="button">Center hit</button>
-      </fieldset>
-      <p id="shot-control-instructions">Touch anywhere on the table to aim from the cue ball toward that point; drag to refine direction without shooting. Drag the POWER bar down to adjust strength; release a charged pull to shoot. The amber line shows power, not the ball's predicted travel.</p>
-      <button id="fullscreen-table" type="button">Full screen</button>
-      </details>
       <div id="table-stage">
-      <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Touch a point to aim from the cue ball toward it; drag to refine. Drag the POWER bar down and release to shoot."></canvas>
+        <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Touch a point to aim from the cue ball toward it; drag to refine. Drag the POWER bar down and release to shoot."></canvas>
       </div>
+
+      <header id="hud">
+        <button id="open-settings" class="icon-button" type="button" aria-label="Menu and settings" aria-controls="settings-sheet" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+        </button>
+        <div id="match-hud" role="status" aria-live="polite">
+          <span id="hud-players"></span>
+          <span id="hud-turn"></span>
+          <output id="turn-timer" aria-label="Turn time remaining" hidden></output>
+        </div>
+        <button id="open-play" class="pill-button" type="button" aria-controls="play-sheet" aria-expanded="false">
+          <span id="open-play-label">Play friends</span>
+          <span id="play-badge" class="badge" hidden></span>
+        </button>
+      </header>
+      <output id="match-status" aria-hidden="true"></output>
       <footer id="game-help">Touch a direction on the table to aim · Drag POWER down and release to shoot</footer>
-      <section id="rotate-device" role="status" aria-live="polite">
-        <strong>Rotate your device</strong>
-        <span>Pool with More Than Friends plays in landscape.</span>
+
+      <button id="spin-button" type="button" aria-label="Cue spin" aria-controls="spin-popover" aria-expanded="false">
+        <span class="spin-face"><i id="spin-button-dot"></i></span>
+      </button>
+      <section id="spin-popover" aria-label="Cue spin" hidden>
+        <div id="spin-pad" role="slider" tabindex="0" aria-label="Cue ball contact point" aria-valuetext="Center hit">
+          <i id="spin-pad-dot"></i>
+        </div>
+        <span id="spin-label">Center hit</span>
+        <button id="reset-spin" type="button">Center</button>
+        <input id="spin-side" type="range" min="-100" max="100" value="0" hidden />
+        <input id="spin-vertical" type="range" min="-100" max="100" value="0" hidden />
       </section>
+
+      <section id="match-result" role="status" aria-live="polite" hidden>
+        <strong id="match-result-title"></strong>
+        <span id="match-result-detail"></span>
+        <div class="button-row">
+          <button id="offer-rematch" class="primary" type="button" hidden>Offer rematch</button>
+          <a id="back-to-practice" class="button secondary" href="/">Back to practice</a>
+        </div>
+      </section>
+
+      <div id="sheet-backdrop" hidden></div>
+
+      <section id="play-sheet" class="sheet" aria-labelledby="play-sheet-title" hidden>
+        <header class="sheet-header">
+          <span class="brand-mark" aria-hidden="true"><b>8</b></span>
+          <h2 id="play-sheet-title">Play with friends</h2>
+          <button class="icon-button sheet-close" type="button" data-close-sheet aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </header>
+        <div class="sheet-body">
+          <section id="rotate-hint" class="card hint-card">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M2 14a8 8 0 0 0 8 8M22 10a8 8 0 0 0-8-8" /></svg>
+            <span id="rotate-hint-text">Turn your phone sideways to practice.</span>
+          </section>
+
+          <section id="account-panel" class="card" hidden>
+            <p id="account-label">Sign in to challenge friends online. Practice works without an account.</p>
+            <form id="google-sign-in" method="post" action="/auth/google/start">
+              <button class="primary wide" type="submit">Sign in with Google</button>
+            </form>
+            <form id="development-sign-in" class="inline-form" hidden>
+              <label for="development-username">Local username</label>
+              <div class="input-row">
+                <input id="development-username" name="username" type="text" minlength="3" maxlength="24" pattern="[a-z][a-z0-9_]{2,23}" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+                <button class="primary" type="submit">Sign in</button>
+              </div>
+            </form>
+          </section>
+
+          <div id="social-panel" hidden>
+            <section id="handle-card" class="card">
+              <p id="handle-summary" hidden>Playing as <strong id="handle-display"></strong></p>
+              <form id="handle-form" class="inline-form">
+                <label for="handle-input">Choose your player name</label>
+                <div class="input-row">
+                  <span class="input-prefix">@</span>
+                  <input id="handle-input" type="text" minlength="3" maxlength="24" pattern="[a-z][a-z0-9_]{2,23}" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="yourname" required />
+                  <button class="primary" type="submit">Save</button>
+                </div>
+                <small>3–24 lowercase letters, numbers or _, starting with a letter. Friends use it to challenge you, and it can't be changed later.</small>
+              </form>
+            </section>
+
+            <section id="lobby-panel" class="card highlight" hidden>
+              <h3 id="lobby-label">Game lobby</h3>
+              <ul class="players">
+                <li id="lobby-self"><span class="dot"></span><span>You</span><em id="lobby-self-state"></em></li>
+                <li id="lobby-opponent"><span class="dot"></span><span id="lobby-opponent-name">Friend</span><em id="lobby-opponent-state"></em></li>
+              </ul>
+              <span id="lobby-state"></span>
+              <div class="button-row">
+                <button id="ready-lobby" class="primary wide" type="button">I'm ready</button>
+                <button id="cancel-lobby" class="secondary" type="button">Leave</button>
+              </div>
+            </section>
+
+            <section id="start-game" class="card">
+              <h3>Start a game</h3>
+              <button id="create-invitation" class="primary wide" type="button">Invite with a link</button>
+              <div id="invitation-output" class="row invitation" hidden>
+                <input id="invitation-url" type="text" readonly aria-label="Invitation link" />
+                <button id="copy-invitation" class="secondary" type="button">Copy</button>
+              </div>
+              <div class="divider"><span>or</span></div>
+              <form id="challenge-form" class="inline-form">
+                <label for="challenge-handle">Challenge by player name</label>
+                <div class="input-row">
+                  <span class="input-prefix">@</span>
+                  <input id="challenge-handle" type="text" minlength="3" maxlength="24" pattern="[a-z][a-z0-9_]{2,23}" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="friend" required />
+                  <button class="secondary" type="submit">Challenge</button>
+                </div>
+              </form>
+            </section>
+
+            <section id="incoming" class="card" hidden>
+              <h3>Waiting for you</h3>
+              <div id="challenge-list" class="list"></div>
+              <div id="rematch-list" class="list"></div>
+            </section>
+
+            <section id="account-lobbies" class="card" hidden>
+              <h3>Your games</h3>
+              <div id="lobby-list" class="list"></div>
+            </section>
+          </div>
+          <button id="open-settings-inline" class="text-button portrait-only" type="button">Settings</button>
+        </div>
+      </section>
+
+      <section id="settings-sheet" class="sheet" aria-labelledby="settings-sheet-title" hidden>
+        <header class="sheet-header">
+          <h2 id="settings-sheet-title">Menu</h2>
+          <button class="icon-button sheet-close" type="button" data-close-sheet aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </header>
+        <div class="sheet-body">
+          <section id="current-game" class="card" hidden>
+            <h3>Current game</h3>
+            <p id="current-game-label"></p>
+            <div class="button-row">
+              <button id="concede-match" class="danger" type="button" hidden>Concede</button>
+              <a class="button secondary" href="/">Back to practice</a>
+            </div>
+          </section>
+
+          <section class="card">
+            <h3>Controls</h3>
+            <label class="field" id="shot-control-mode-control">Shooting
+              <select id="shot-control-mode" aria-label="Shot control mode">
+                <option value="1" selected>Aim on table + power bar</option>
+                <option value="0">Pull back to aim and shoot</option>
+              </select>
+            </label>
+            <p id="shot-control-instructions" class="help"></p>
+            <label class="field" id="aim-mode-control">Aim guide
+              <select id="aim-mode" aria-label="Aim guide mode">
+                <option value="1">Short (physics-accurate)</option>
+                <option value="0">Simple (geometric)</option>
+                <option value="2">Full (3-second physics preview)</option>
+              </select>
+            </label>
+            <label class="toggle"><input id="unlimited-aim-range" type="checkbox" /> <span>Unlimited guide length</span></label>
+          </section>
+
+          <section class="card">
+            <h3>Display</h3>
+            <button id="fullscreen-table" class="secondary wide" type="button">Full screen</button>
+            <section id="install-app" hidden>
+              <strong>Install Pool Friends</strong>
+              <p id="install-app-hint"></p>
+              <button id="install-app-button" class="secondary wide" type="button" hidden>Install app</button>
+            </section>
+          </section>
+
+          <section id="account-settings" class="card" hidden>
+            <h3>Account</h3>
+            <p id="account-settings-label"></p>
+            <button id="sign-out" class="secondary wide" type="button">Sign out</button>
+          </section>
+        </div>
+      </section>
+
+      <p id="social-status" class="toast" role="status" aria-live="polite"></p>
+
       <section id="loading" role="status" aria-live="polite">
         <span class="loading-mark" aria-hidden="true"><i></i><b>8</b><i></i></span>
         <strong>Racking the table</strong>

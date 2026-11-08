@@ -657,6 +657,12 @@ fn spawn_overlay(commands: &mut Commands, _presentation_tier: &str) {
         TextFont::from_font_size(12.0),
         TextColor(Color::srgb(0.92, 0.85, 0.65)),
         Node {
+            // The browser HUD owns status text; keep this for native runs only.
+            display: if cfg!(target_arch = "wasm32") {
+                Display::None
+            } else {
+                Display::Flex
+            },
             position_type: PositionType::Absolute,
             top: px(4),
             left: px(24),

@@ -150,6 +150,11 @@ impl MatchUnit {
         lock(&self.head).deadline
     }
 
+    /// Returns whether the canonical match still accepts turns.
+    pub fn in_progress(&self) -> bool {
+        lock(&self.head).in_progress
+    }
+
     fn refresh_head(&self, service: &MatchService<SwitchyCommandJournal>) {
         if let Ok(head) = head_of(service, self.match_id) {
             *lock(&self.head) = head;
