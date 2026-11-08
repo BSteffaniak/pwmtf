@@ -1,7 +1,7 @@
 //! Rebuildable match-summary projection derived from canonical snapshots.
 
 use crate::{AccountId, MatchId, Participants};
-use pwmtf_game_domain::{CompletionReason, MatchConfiguration, MatchState, MatchStatus, Player};
+use pwmtf_eight_ball::{CompletionReason, MatchConfiguration, MatchState, MatchStatus, Player};
 use switchy_database::{Database, query::FilterableQuery as _};
 use thiserror::Error;
 
@@ -222,9 +222,8 @@ const fn checksum_i64(value: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use futures_lite::future::block_on;
-    use pwmtf_game_domain::{
-        MatchCommand, PhysicsProfile, RackSeed, RulesProfile, TableGeometry, VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{PhysicsProfile, RackSeed, TableGeometry};
+    use pwmtf_eight_ball::{MatchCommand, RulesProfile, VersionedMatchCommand};
 
     use super::*;
 

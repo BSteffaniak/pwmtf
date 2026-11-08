@@ -1,23 +1,19 @@
 #![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
-//! Canonical, renderer-independent billiards state and simulation.
+//! Deterministic, renderer-independent billiards physics.
+//!
+//! Integer fixed-point table-plane simulation: identical results on every
+//! platform, so a server and any number of clients can resolve the same shot
+//! independently. Game rules live in separate crates such as `pwmtf_eight_ball`.
 
 use thiserror::Error;
 
 mod corpus;
 mod rack;
-mod rules;
 
 pub use corpus::{ShotFixture, qualification_corpus, qualification_profile};
 pub use rack::{RackError, RackSeed, standard_rack};
-pub use rules::{
-    AppliedCommand, CompletionReason, Foul, Group, MATCH_COMMAND_RESULT_VERSION,
-    MATCH_COMMAND_VERSION, MATCH_CONFIGURATION_VERSION, MATCH_STATE_VERSION, MatchCommand,
-    MatchCommandResult, MatchConfiguration, MatchDecodeError, MatchError, MatchOutcome,
-    MatchResultDecodeError, MatchState, MatchStatus, Objective, Player, RULES_PROFILE_VERSION,
-    RematchMetadata, RulesProfile, RulesProfileError, ShotResolution, VersionedMatchCommand,
-};
 
 /// Canonical table schema, including complete rolling and vertical spin state.
 pub const TABLE_STATE_VERSION: u16 = 2;

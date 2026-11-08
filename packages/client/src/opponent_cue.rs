@@ -6,7 +6,7 @@
 //! a real cue, never overshooting. Between gestures it rests at the last aim
 //! with no power rather than disappearing.
 
-use pwmtf_game_domain::{Aim, ShotPower, Spin};
+use pwmtf_billiards::{Aim, ShotPower, Spin};
 
 use crate::transport::OpponentCueTarget;
 

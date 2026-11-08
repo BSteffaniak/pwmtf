@@ -1,11 +1,11 @@
 [package]
 authors     = { workspace = true }
 categories  = ["games", "simulation"]
-description = "Canonical billiards physics and 8-ball rules for Pool with More Than Friends"
+description = "Deterministic fixed-point billiards physics"
 edition     = { workspace = true }
 keywords    = ["billiards", "game", "physics", "pool", "simulation"]
 license     = { workspace = true }
-name        = "pwmtf_game_domain"
+name        = "pwmtf_billiards"
 readme      = "README.md"
 repository  = { workspace = true }
 version     = { workspace = true }

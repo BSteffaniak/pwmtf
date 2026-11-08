@@ -18,9 +18,9 @@ assert_rejected() {
 
 reset_fixture() {
     rm -rf "$tmp/packages"
-    mkdir -p "$tmp/packages/game_domain/src" "$tmp/packages/server/src"
-    printf '%s\n' 'pub struct SafeDomainType;' > "$tmp/packages/game_domain/src/lib.rs"
-    printf '%s\n' '[package]' 'name = "pwmtf_game_domain"' > "$tmp/packages/game_domain/Cargo.toml"
+    mkdir -p "$tmp/packages/billiards/src" "$tmp/packages/server/src"
+    printf '%s\n' 'pub struct SafeDomainType;' > "$tmp/packages/billiards/src/lib.rs"
+    printf '%s\n' '[package]' 'name = "pwmtf_billiards"' > "$tmp/packages/billiards/Cargo.toml"
     printf '%s\n' '[package]' 'name = "pwmtf_server"' > "$tmp/packages/server/Cargo.toml"
 }
 
@@ -29,11 +29,11 @@ printf '%s\n' 'const QUERY: &str = "SELECT * FROM matches";' > "$tmp/packages/se
 assert_rejected "raw SQL"
 
 reset_fixture
-printf '%s\n' 'use bevy::prelude::*;' > "$tmp/packages/game_domain/src/lib.rs"
+printf '%s\n' 'use bevy::prelude::*;' > "$tmp/packages/billiards/src/lib.rs"
 assert_rejected "Bevy in the game domain"
 
 reset_fixture
-printf '%s\n' 'use switchy_database::Database;' > "$tmp/packages/game_domain/src/lib.rs"
+printf '%s\n' 'use switchy_database::Database;' > "$tmp/packages/billiards/src/lib.rs"
 assert_rejected "persistence in the game domain"
 
 reset_fixture
@@ -46,11 +46,11 @@ printf '%s\n' '[package]' 'name = "unprefixed"' > "$tmp/packages/server/Cargo.to
 assert_rejected "an unprefixed package name"
 
 reset_fixture
-printf '%s\n' 'pub enum TimeoutOutcome { Forfeit }' > "$tmp/packages/game_domain/src/lib.rs"
+printf '%s\n' 'pub enum TimeoutOutcome { Forfeit }' > "$tmp/packages/billiards/src/lib.rs"
 assert_rejected "timeout forfeiture behavior"
 
 reset_fixture
-printf '%s\n' 'pub struct CanonicalSnapshot { value: u8 }' > "$tmp/packages/game_domain/src/lib.rs"
+printf '%s\n' 'pub struct CanonicalSnapshot { value: u8 }' > "$tmp/packages/billiards/src/lib.rs"
 assert_rejected "an unversioned canonical payload marker"
 
 reset_fixture

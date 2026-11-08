@@ -32,7 +32,7 @@ const CUSHION: f32 = 34.0;
 // introduce a second, independently tuned collision radius.
 #[allow(clippy::cast_precision_loss)]
 const BALL_RADIUS: f32 = {
-    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    let geometry = pwmtf_billiards::TableGeometry::standard();
     geometry.ball_radius().micros() as f32 / geometry.half_width().micros() as f32
         * (TABLE_SIZE.x / 2.0)
 };
@@ -73,13 +73,13 @@ const TAP_MAX_SECONDS: f64 = 0.3;
 /// Finger-sized tap radius around a pocket when calling the 8-ball.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const POCKET_SELECTION_RADIUS: f32 = 60.0;
-const POCKET_IDS: [pwmtf_game_domain::PocketId; 6] = [
-    pwmtf_game_domain::PocketId::TopLeft,
-    pwmtf_game_domain::PocketId::TopCenter,
-    pwmtf_game_domain::PocketId::TopRight,
-    pwmtf_game_domain::PocketId::BottomLeft,
-    pwmtf_game_domain::PocketId::BottomCenter,
-    pwmtf_game_domain::PocketId::BottomRight,
+const POCKET_IDS: [pwmtf_billiards::PocketId; 6] = [
+    pwmtf_billiards::PocketId::TopLeft,
+    pwmtf_billiards::PocketId::TopCenter,
+    pwmtf_billiards::PocketId::TopRight,
+    pwmtf_billiards::PocketId::BottomLeft,
+    pwmtf_billiards::PocketId::BottomCenter,
+    pwmtf_billiards::PocketId::BottomRight,
 ];
 #[cfg(target_arch = "wasm32")]
 static SPIN_SIDE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -129,7 +129,7 @@ struct CanonicalPresentation {
     target: std::collections::BTreeMap<u8, Vec2>,
     pocketed: std::collections::BTreeSet<u8>,
     status: Option<String>,
-    active_player: Option<pwmtf_game_domain::Player>,
+    active_player: Option<pwmtf_eight_ball::Player>,
     completed: bool,
     /// Place balls exactly at `target` this frame instead of easing toward it:
     /// set while a shot plays back and on the frame playback ends or resets.
@@ -393,7 +393,7 @@ pub fn match_checksum() -> Option<u64> {
 pub fn send_cue_ball_placement(x_micros: i64, y_micros: i64) -> Result<(), wasm_bindgen::JsValue> {
     browser_transport::submit_cue_ball_placement(
         random_command_id()?,
-        pwmtf_game_domain::Vector::from_micros(x_micros, y_micros),
+        pwmtf_billiards::Vector::from_micros(x_micros, y_micros),
     )
 }
 
@@ -412,16 +412,16 @@ pub fn send_shot_command(
     spin_vertical: i16,
     called_pocket: u8,
 ) -> Result<(), wasm_bindgen::JsValue> {
-    let aim = pwmtf_game_domain::Aim::new(aim_steps)
+    let aim = pwmtf_billiards::Aim::new(aim_steps)
         .map_err(|_| wasm_bindgen::JsValue::from_str("invalid aim"))?;
-    let power = pwmtf_game_domain::ShotPower::new(power_units)
+    let power = pwmtf_billiards::ShotPower::new(power_units)
         .map_err(|_| wasm_bindgen::JsValue::from_str("invalid power"))?;
-    let spin = pwmtf_game_domain::Spin::new(spin_side, spin_vertical)
+    let spin = pwmtf_billiards::Spin::new(spin_side, spin_vertical)
         .map_err(|_| wasm_bindgen::JsValue::from_str("invalid spin"))?;
     let called_pocket = decode_called_pocket(called_pocket)?;
     browser_transport::submit_shot(
         random_command_id()?,
-        pwmtf_game_domain::VersionedShotCommand::new(aim, power, spin),
+        pwmtf_billiards::VersionedShotCommand::new(aim, power, spin),
         called_pocket,
     )
 }
@@ -437,8 +437,8 @@ pub fn send_shot_command(
 /// identifier generation failure.
 pub fn send_concession(player: u8) -> Result<(), wasm_bindgen::JsValue> {
     let player = match player {
-        1 => pwmtf_game_domain::Player::One,
-        2 => pwmtf_game_domain::Player::Two,
+        1 => pwmtf_eight_ball::Player::One,
+        2 => pwmtf_eight_ball::Player::Two,
         _ => return Err(wasm_bindgen::JsValue::from_str("invalid player seat")),
     };
     browser_transport::submit_concession(random_command_id()?, player)
@@ -447,15 +447,15 @@ pub fn send_concession(player: u8) -> Result<(), wasm_bindgen::JsValue> {
 #[cfg(target_arch = "wasm32")]
 fn decode_called_pocket(
     value: u8,
-) -> Result<Option<pwmtf_game_domain::PocketId>, wasm_bindgen::JsValue> {
+) -> Result<Option<pwmtf_billiards::PocketId>, wasm_bindgen::JsValue> {
     Ok(match value {
         0 => None,
-        1 => Some(pwmtf_game_domain::PocketId::TopLeft),
-        2 => Some(pwmtf_game_domain::PocketId::TopCenter),
-        3 => Some(pwmtf_game_domain::PocketId::TopRight),
-        4 => Some(pwmtf_game_domain::PocketId::BottomLeft),
-        5 => Some(pwmtf_game_domain::PocketId::BottomCenter),
-        6 => Some(pwmtf_game_domain::PocketId::BottomRight),
+        1 => Some(pwmtf_billiards::PocketId::TopLeft),
+        2 => Some(pwmtf_billiards::PocketId::TopCenter),
+        3 => Some(pwmtf_billiards::PocketId::TopRight),
+        4 => Some(pwmtf_billiards::PocketId::BottomLeft),
+        5 => Some(pwmtf_billiards::PocketId::BottomCenter),
+        6 => Some(pwmtf_billiards::PocketId::BottomRight),
         _ => return Err(wasm_bindgen::JsValue::from_str("invalid called pocket")),
     })
 }
@@ -470,8 +470,8 @@ fn random_command_id() -> Result<pwmtf_protocol::CommandId, wasm_bindgen::JsValu
     Ok(pwmtf_protocol::CommandId::new(bytes))
 }
 
-fn practice_shot(input: &PrototypeInput) -> pwmtf_game_domain::VersionedShotCommand {
-    use pwmtf_game_domain::{Aim, ShotPower, Spin, VersionedShotCommand};
+fn practice_shot(input: &PrototypeInput) -> pwmtf_billiards::VersionedShotCommand {
+    use pwmtf_billiards::{Aim, ShotPower, Spin, VersionedShotCommand};
     let turns = input.aim_angle.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let aim = (turns * f32::from(Aim::STEPS_PER_TURN)).round() as u16 % Aim::STEPS_PER_TURN;
@@ -588,12 +588,12 @@ fn setup(
     mut pocket_materials: ResMut<Assets<ColorMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let initial = pwmtf_game_domain::MatchState::new(
-        pwmtf_game_domain::RulesProfile::standard(),
-        pwmtf_game_domain::PhysicsProfile::standard(),
-        pwmtf_game_domain::TableGeometry::standard(),
-        pwmtf_game_domain::RackSeed::new(42),
-        pwmtf_game_domain::Player::One,
+    let initial = pwmtf_eight_ball::MatchState::new(
+        pwmtf_eight_ball::RulesProfile::standard(),
+        pwmtf_billiards::PhysicsProfile::standard(),
+        pwmtf_billiards::TableGeometry::standard(),
+        pwmtf_billiards::RackSeed::new(42),
+        pwmtf_eight_ball::Player::One,
     )
     .expect("built-in canonical match configuration is valid");
     #[cfg(target_arch = "wasm32")]
@@ -766,14 +766,14 @@ fn spawn_rectangle(commands: &mut Commands, size: Vec2, color: Color, translatio
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn canonical_to_world(position: pwmtf_game_domain::Vector) -> Vec2 {
+fn canonical_to_world(position: pwmtf_billiards::Vector) -> Vec2 {
     micros_to_world(position.x.micros() as f64, position.y.micros() as f64)
 }
 
 /// Maps sub-tick interpolated canonical micro-metres to world coordinates.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn micros_to_world(x_micros: f64, y_micros: f64) -> Vec2 {
-    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    let geometry = pwmtf_billiards::TableGeometry::standard();
     Vec2::new(
         ((x_micros / geometry.half_width().micros() as f64) as f32)
             .mul_add(TABLE_SIZE.x / 2.0, TABLE_CENTER_X),
@@ -781,16 +781,16 @@ fn micros_to_world(x_micros: f64, y_micros: f64) -> Vec2 {
     )
 }
 
-const fn player_number(player: pwmtf_game_domain::Player) -> u8 {
+const fn player_number(player: pwmtf_eight_ball::Player) -> u8 {
     match player {
-        pwmtf_game_domain::Player::One => 1,
-        pwmtf_game_domain::Player::Two => 2,
+        pwmtf_eight_ball::Player::One => 1,
+        pwmtf_eight_ball::Player::Two => 2,
     }
 }
 
 fn match_status_text(
-    active_player: pwmtf_game_domain::Player,
-    outcome: Option<pwmtf_game_domain::MatchOutcome>,
+    active_player: pwmtf_eight_ball::Player,
+    outcome: Option<pwmtf_eight_ball::MatchOutcome>,
 ) -> String {
     outcome.map_or_else(
         || format!("Player {} to shoot", player_number(active_player)),
@@ -799,11 +799,11 @@ fn match_status_text(
 }
 
 impl CanonicalPresentation {
-    fn project(&mut self, state: &pwmtf_game_domain::MatchState) {
+    fn project(&mut self, state: &pwmtf_eight_ball::MatchState) {
         self.checksum = Some(state.checksum());
         let outcome = match state.status() {
-            pwmtf_game_domain::MatchStatus::InProgress => None,
-            pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
+            pwmtf_eight_ball::MatchStatus::InProgress => None,
+            pwmtf_eight_ball::MatchStatus::Completed(outcome) => Some(outcome),
         };
         self.completed = outcome.is_some();
         self.active_player = (!self.completed).then_some(state.active_player());
@@ -881,8 +881,8 @@ fn synchronize_canonical_presentation(
             presentation.project(predicted);
             let authority = prediction.authoritative();
             let outcome = match authority.status() {
-                pwmtf_game_domain::MatchStatus::InProgress => None,
-                pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
+                pwmtf_eight_ball::MatchStatus::InProgress => None,
+                pwmtf_eight_ball::MatchStatus::Completed(outcome) => Some(outcome),
             };
             presentation.completed = outcome.is_some();
             presentation.active_player =
@@ -1043,7 +1043,7 @@ fn spawn_pocket_art(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
 ) {
-    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    let geometry = pwmtf_billiards::TableGeometry::standard();
     #[allow(clippy::cast_precision_loss)]
     let scale = TABLE_SIZE.x / (2.0 * geometry.half_width().micros() as f32);
     #[allow(clippy::cast_precision_loss)]
@@ -1274,7 +1274,7 @@ fn update_from_pointer(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn screen_to_canonical(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_domain::Vector> {
+fn screen_to_canonical(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_billiards::Vector> {
     let scale = (window_size / DESIGN_SIZE).min_element();
     if scale <= 0.0 {
         return None;
@@ -1292,17 +1292,17 @@ fn screen_to_canonical(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_dom
     }
     let normalized_x = ((design.x - table_left) / TABLE_SIZE.x).mul_add(2.0, -1.0);
     let normalized_y = (1.0 - (design.y - table_top) / TABLE_SIZE.y).mul_add(2.0, -1.0);
-    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    let geometry = pwmtf_billiards::TableGeometry::standard();
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     let x = (normalized_x * geometry.half_width().micros() as f32).round() as i64;
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     let y = (normalized_y * geometry.half_height().micros() as f32).round() as i64;
-    Some(pwmtf_game_domain::Vector::from_micros(x, y))
+    Some(pwmtf_billiards::Vector::from_micros(x, y))
 }
 
 /// World position of a named pocket, matching the canonical table (y up).
-const fn pocket_world(pocket: pwmtf_game_domain::PocketId) -> Vec2 {
-    use pwmtf_game_domain::PocketId;
+const fn pocket_world(pocket: pwmtf_billiards::PocketId) -> Vec2 {
+    use pwmtf_billiards::PocketId;
     let half = Vec2::new(TABLE_SIZE.x / 2.0, TABLE_SIZE.y / 2.0);
     match pocket {
         PocketId::TopLeft => Vec2::new(TABLE_CENTER_X - half.x, half.y),
@@ -1316,7 +1316,7 @@ const fn pocket_world(pocket: pwmtf_game_domain::PocketId) -> Vec2 {
 
 /// The pocket under a tap, if any.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn selected_pocket(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_domain::PocketId> {
+fn selected_pocket(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_billiards::PocketId> {
     let position = pointer_world(cursor, window_size);
     if !position.is_finite() {
         return None;
@@ -1339,7 +1339,7 @@ fn draw_pocket_call(mut gizmos: Gizmos, time: Res<Time<Real>>) {
         browser_transport::called_pocket(),
     );
     #[cfg(not(target_arch = "wasm32"))]
-    let (calling, called): (bool, Option<pwmtf_game_domain::PocketId>) = (false, None);
+    let (calling, called): (bool, Option<pwmtf_billiards::PocketId>) = (false, None);
     if !calling {
         return;
     }
@@ -1677,7 +1677,7 @@ fn apply_turn_start_aim(input: &mut PrototypeInput) {
     input.aim_revision = revision;
     if let Some(aim) = browser_transport::turn_start_aim() {
         input.aim_angle = f32::from(aim.steps()) * std::f32::consts::TAU
-            / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN);
+            / f32::from(pwmtf_billiards::Aim::STEPS_PER_TURN);
     }
 }
 
@@ -1710,12 +1710,12 @@ fn publish_tap_aim(input: &mut PrototypeInput) {
 fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
     let shot = practice_shot(input);
     let called_pocket = browser_transport::called_pocket().map_or(0, |pocket| match pocket {
-        pwmtf_game_domain::PocketId::TopLeft => 1,
-        pwmtf_game_domain::PocketId::TopCenter => 2,
-        pwmtf_game_domain::PocketId::TopRight => 3,
-        pwmtf_game_domain::PocketId::BottomLeft => 4,
-        pwmtf_game_domain::PocketId::BottomCenter => 5,
-        pwmtf_game_domain::PocketId::BottomRight => 6,
+        pwmtf_billiards::PocketId::TopLeft => 1,
+        pwmtf_billiards::PocketId::TopCenter => 2,
+        pwmtf_billiards::PocketId::TopRight => 3,
+        pwmtf_billiards::PocketId::BottomLeft => 4,
+        pwmtf_billiards::PocketId::BottomCenter => 5,
+        pwmtf_billiards::PocketId::BottomRight => 6,
     });
     send_shot_command(
         shot.aim.steps(),
@@ -1872,9 +1872,8 @@ mod tests {
 
     #[test]
     fn canonical_projection_drives_ball_targets_and_pockets() {
-        use pwmtf_game_domain::{
-            MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
-        };
+        use pwmtf_billiards::{PhysicsProfile, RackSeed, TableGeometry};
+        use pwmtf_eight_ball::{MatchState, Player, RulesProfile};
         let state = MatchState::new(
             RulesProfile::standard(),
             PhysicsProfile::standard(),
@@ -1891,16 +1890,15 @@ mod tests {
         assert!(presentation.target.contains_key(&0));
         assert!(presentation.pocketed.is_empty());
         assert_eq!(
-            canonical_to_world(pwmtf_game_domain::Vector::ZERO),
+            canonical_to_world(pwmtf_billiards::Vector::ZERO),
             Vec2::new(TABLE_CENTER_X, 0.0)
         );
     }
 
     #[test]
     fn terminal_projection_hides_live_match_chrome() {
-        use pwmtf_game_domain::{
-            MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
-        };
+        use pwmtf_billiards::{PhysicsProfile, RackSeed, TableGeometry};
+        use pwmtf_eight_ball::{MatchState, Player, RulesProfile};
         let mut state = MatchState::new(
             RulesProfile::standard(),
             PhysicsProfile::standard(),
@@ -2126,7 +2124,7 @@ mod tests {
 
     #[test]
     fn tapping_a_drawn_pocket_selects_that_pocket() {
-        let geometry = pwmtf_game_domain::TableGeometry::standard();
+        let geometry = pwmtf_billiards::TableGeometry::standard();
         let (hw, hh) = (
             geometry.half_width().micros(),
             geometry.half_height().micros(),
@@ -2146,7 +2144,7 @@ mod tests {
         ] {
             let scale = (size / DESIGN_SIZE).min_element();
             for (pocket, (x, y)) in POCKET_IDS.into_iter().zip(canonical) {
-                let world = canonical_to_world(pwmtf_game_domain::Vector::from_micros(x, y));
+                let world = canonical_to_world(pwmtf_billiards::Vector::from_micros(x, y));
                 assert!(
                     world.distance(pocket_world(pocket)) < 0.01,
                     "{pocket:?} drawn where the rules put it"

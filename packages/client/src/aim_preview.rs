@@ -131,7 +131,7 @@ pub fn draw(
     }
     if enabled && let Some(&origin) = presentation.target.get(&0) {
         let direction = Vec2::from_angle(input.aim_angle);
-        let segments: Vec<_> = pwmtf_game_domain::TableGeometry::standard()
+        let segments: Vec<_> = pwmtf_billiards::TableGeometry::standard()
             .cushion_segments()
             .into_iter()
             .map(|(a, b)| (canonical_to_world(a), canonical_to_world(b)))
@@ -158,8 +158,8 @@ pub fn draw(
         let state = if sandbox.enabled {
             Some((
                 sandbox.table.clone(),
-                pwmtf_game_domain::PhysicsProfile::standard(),
-                pwmtf_game_domain::TableGeometry::standard(),
+                pwmtf_billiards::PhysicsProfile::standard(),
+                pwmtf_billiards::TableGeometry::standard(),
             ))
         } else {
             #[cfg(target_arch = "wasm32")]
@@ -187,7 +187,7 @@ pub fn draw(
         return;
     };
     let direction = Vec2::from_angle(input.aim_angle);
-    let segments: Vec<_> = pwmtf_game_domain::TableGeometry::standard()
+    let segments: Vec<_> = pwmtf_billiards::TableGeometry::standard()
         .cushion_segments()
         .into_iter()
         .map(|(a, b)| (canonical_to_world(a), canonical_to_world(b)))

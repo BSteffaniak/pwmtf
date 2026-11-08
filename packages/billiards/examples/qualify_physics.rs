@@ -1,8 +1,6 @@
 use std::{env, hint::black_box, process::ExitCode, time::Instant};
 
-use pwmtf_game_domain::{
-    TableGeometry, qualification_corpus, qualification_profile, simulate_shot,
-};
+use pwmtf_billiards::{TableGeometry, qualification_corpus, qualification_profile, simulate_shot};
 
 fn main() -> ExitCode {
     let iterations = env::args()

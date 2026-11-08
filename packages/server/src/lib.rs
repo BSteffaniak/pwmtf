@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeMap, future::Future};
 
-use pwmtf_game_domain::{MatchCommandResult, MatchState, Player};
+use pwmtf_eight_ball::{MatchCommandResult, MatchState, Player};
 use pwmtf_protocol::{CommandEnvelope, CommandId, SnapshotEnvelope};
 use thiserror::Error;
 
@@ -116,7 +116,7 @@ impl DeadlineMillis {
 
     /// Creates a deadline one turn after `now` using an immutable rules profile.
     #[must_use]
-    pub const fn after_turn(now: Self, rules: pwmtf_game_domain::RulesProfile) -> Self {
+    pub const fn after_turn(now: Self, rules: pwmtf_eight_ball::RulesProfile) -> Self {
         Self(now.0.saturating_add(rules.turn_duration_millis()))
     }
 
@@ -128,9 +128,9 @@ impl DeadlineMillis {
     #[must_use]
     pub const fn after_playback_and_turn(
         now: Self,
-        physics: pwmtf_game_domain::PhysicsProfile,
+        physics: pwmtf_billiards::PhysicsProfile,
         playback_ticks: u32,
-        rules: pwmtf_game_domain::RulesProfile,
+        rules: pwmtf_eight_ball::RulesProfile,
     ) -> Self {
         Self::after_turn(
             Self(
@@ -607,7 +607,7 @@ impl<J: CommandJournal> MatchService<J> {
             .ok_or(CommandError::MatchNotFound)?;
         if !matches!(
             runtime.state.status(),
-            pwmtf_game_domain::MatchStatus::InProgress
+            pwmtf_eight_ball::MatchStatus::InProgress
         ) {
             return if runtime.deadline.is_none() {
                 Ok(None)
@@ -629,7 +629,7 @@ impl<J: CommandJournal> MatchService<J> {
         let envelope = CommandEnvelope::new(
             deadline.id.revision,
             timeout_command_id(deadline.id),
-            pwmtf_game_domain::VersionedMatchCommand::new(pwmtf_game_domain::MatchCommand::Timeout),
+            pwmtf_eight_ball::VersionedMatchCommand::new(pwmtf_eight_ball::MatchCommand::Timeout),
         );
         self.apply_at(match_id, actor, envelope, now)
             .await
@@ -733,7 +733,7 @@ impl<J: CommandJournal> MatchService<J> {
             records_last_deadline = record.deadline;
             terminal_revision = matches!(
                 restored.status(),
-                pwmtf_game_domain::MatchStatus::Completed(_)
+                pwmtf_eight_ball::MatchStatus::Completed(_)
             )
             .then_some(record.revision);
             state = Some(restored);
@@ -809,7 +809,7 @@ impl<J: CommandJournal> MatchService<J> {
         }
         if !matches!(
             runtime.state.status(),
-            pwmtf_game_domain::MatchStatus::InProgress
+            pwmtf_eight_ball::MatchStatus::InProgress
         ) {
             return Err(CommandError::MatchCompleted);
         }
@@ -818,7 +818,7 @@ impl<J: CommandJournal> MatchService<J> {
         {
             return Err(CommandError::WrongActor);
         }
-        if let pwmtf_game_domain::MatchCommand::Concede {
+        if let pwmtf_eight_ball::MatchCommand::Concede {
             player: command_player,
         } = envelope.command.command
             && command_player != player
@@ -827,7 +827,7 @@ impl<J: CommandJournal> MatchService<J> {
         }
 
         let mut candidate = runtime.state.clone();
-        let pwmtf_game_domain::AppliedCommand {
+        let pwmtf_eight_ball::AppliedCommand {
             result,
             playback_ticks,
         } = candidate
@@ -840,7 +840,7 @@ impl<J: CommandJournal> MatchService<J> {
         let checksum = candidate.checksum();
         let deadline = if matches!(
             candidate.status(),
-            pwmtf_game_domain::MatchStatus::InProgress
+            pwmtf_eight_ball::MatchStatus::InProgress
         ) {
             Some(ScheduledDeadline {
                 id: DeadlineId {
@@ -924,20 +924,19 @@ pub fn is_timeout_command_id(command_id: CommandId) -> bool {
     matches!(bytes[8], 1 | 2) && bytes[9..].iter().all(|byte| *byte == 0)
 }
 
-const fn command_requires_active_player(command: pwmtf_game_domain::MatchCommand) -> bool {
+const fn command_requires_active_player(command: pwmtf_eight_ball::MatchCommand) -> bool {
     matches!(
         command,
-        pwmtf_game_domain::MatchCommand::PlayShot { .. }
-            | pwmtf_game_domain::MatchCommand::PlaceCueBall { .. }
+        pwmtf_eight_ball::MatchCommand::PlayShot { .. }
+            | pwmtf_eight_ball::MatchCommand::PlaceCueBall { .. }
     )
 }
 
 #[cfg(test)]
 mod tests {
     use futures_lite::future::block_on;
-    use pwmtf_game_domain::{
-        MatchCommand, PhysicsProfile, RackSeed, RulesProfile, TableGeometry, VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{PhysicsProfile, RackSeed, TableGeometry};
+    use pwmtf_eight_ball::{MatchCommand, RulesProfile, VersionedMatchCommand};
 
     use super::*;
 
@@ -1006,7 +1005,7 @@ mod tests {
             let initial = service.snapshot(MatchId::new(9)).unwrap();
             assert_eq!(initial.revision, 0);
             assert_eq!(
-                pwmtf_game_domain::MatchState::from_bytes(&initial.snapshot)
+                pwmtf_eight_ball::MatchState::from_bytes(&initial.snapshot)
                     .unwrap()
                     .checksum(),
                 initial.checksum
@@ -1022,7 +1021,7 @@ mod tests {
             let reconnect = service.snapshot(MatchId::new(9)).unwrap();
             assert_eq!(reconnect.revision, 1);
             assert_ne!(reconnect.checksum, initial.checksum);
-            let restored = pwmtf_game_domain::MatchState::from_bytes(&reconnect.snapshot).unwrap();
+            let restored = pwmtf_eight_ball::MatchState::from_bytes(&reconnect.snapshot).unwrap();
             assert_eq!(restored.active_player(), Player::Two);
             assert_eq!(restored.checksum(), reconnect.checksum);
         });
@@ -1110,11 +1109,10 @@ mod tests {
                 0,
                 30,
                 MatchCommand::PlayShot {
-                    shot: pwmtf_game_domain::VersionedShotCommand::new(
-                        pwmtf_game_domain::Aim::new(0).unwrap(),
-                        pwmtf_game_domain::ShotPower::new(pwmtf_game_domain::ShotPower::MAX)
-                            .unwrap(),
-                        pwmtf_game_domain::Spin::CENTER,
+                    shot: pwmtf_billiards::VersionedShotCommand::new(
+                        pwmtf_billiards::Aim::new(0).unwrap(),
+                        pwmtf_billiards::ShotPower::new(pwmtf_billiards::ShotPower::MAX).unwrap(),
+                        pwmtf_billiards::Spin::CENTER,
                     ),
                     called_pocket: None,
                 },
@@ -1683,10 +1681,10 @@ mod tests {
                             0,
                             4,
                             MatchCommand::PlayShot {
-                                shot: pwmtf_game_domain::VersionedShotCommand::new(
-                                    pwmtf_game_domain::Aim::new(0).unwrap(),
-                                    pwmtf_game_domain::ShotPower::new(0).unwrap(),
-                                    pwmtf_game_domain::Spin::CENTER,
+                                shot: pwmtf_billiards::VersionedShotCommand::new(
+                                    pwmtf_billiards::Aim::new(0).unwrap(),
+                                    pwmtf_billiards::ShotPower::new(0).unwrap(),
+                                    pwmtf_billiards::Spin::CENTER,
                                 ),
                                 called_pocket: None,
                             },

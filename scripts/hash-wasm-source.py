@@ -26,7 +26,13 @@ DECLARED_FILES = (
     "scripts/with-wasm-bundle-lock.py",
     "scripts/write-wasm-size-evidence.py",
 )
-DECLARED_DIRECTORIES = (".cargo", "packages/client", "packages/game_domain", "packages/protocol")
+DECLARED_DIRECTORIES = (
+    ".cargo",
+    "packages/billiards",
+    "packages/client",
+    "packages/eight_ball",
+    "packages/protocol",
+)
 
 
 def source_inputs(root: Path) -> list[Path]:

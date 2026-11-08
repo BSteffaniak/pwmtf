@@ -6,7 +6,7 @@ use crate::{
     AcceptedCommand, AccountId, CommandJournal, DeadlineId, DeadlineMillis, JournalError, MatchId,
     Participants, ScheduledDeadline,
 };
-use pwmtf_game_domain::{MatchCommandResult, MatchConfiguration, MatchState, Player};
+use pwmtf_eight_ball::{MatchCommandResult, MatchConfiguration, MatchState, Player};
 use pwmtf_protocol::{CommandEnvelope, CommandId};
 use switchy_database::{
     Database, DatabaseValue,
@@ -34,7 +34,7 @@ impl SwitchyCommandJournal {
     ) -> Result<
         (
             Participants,
-            pwmtf_game_domain::MatchState,
+            pwmtf_eight_ball::MatchState,
             Option<ScheduledDeadline>,
         ),
         JournalError,
@@ -459,15 +459,15 @@ fn validate_match_configuration(
 fn validate_deadline(
     deadline: Option<ScheduledDeadline>,
     revision: u64,
-    state: &pwmtf_game_domain::MatchState,
+    state: &pwmtf_eight_ball::MatchState,
 ) -> Result<(), CommandStoreError> {
     match (state.status(), deadline) {
-        (pwmtf_game_domain::MatchStatus::InProgress, Some(value))
+        (pwmtf_eight_ball::MatchStatus::InProgress, Some(value))
             if value.id.revision == revision && value.id.player == state.active_player() =>
         {
             Ok(())
         }
-        (pwmtf_game_domain::MatchStatus::Completed(_), None) => Ok(()),
+        (pwmtf_eight_ball::MatchStatus::Completed(_), None) => Ok(()),
         _ => Err(CommandStoreError::Malformed),
     }
 }
@@ -656,10 +656,8 @@ const fn checksum_i64(value: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use futures_lite::future::block_on;
-    use pwmtf_game_domain::{
-        MatchCommand, MatchState, PhysicsProfile, RackSeed, RulesProfile, TableGeometry,
-        VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{PhysicsProfile, RackSeed, TableGeometry};
+    use pwmtf_eight_ball::{MatchCommand, MatchState, RulesProfile, VersionedMatchCommand};
 
     use super::*;
 

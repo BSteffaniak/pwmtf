@@ -2,7 +2,7 @@
 
 ## Decision
 
-PWMTF selects the focused fixed-point billiards solver in `pwmtf_game_domain` for physics profile version 1.
+PWMTF selects the focused fixed-point billiards solver now in `pwmtf_billiards` for physics profile version 1.
 
 The selected solver uses integer micro-units, quantized external commands, fixed 240 Hz ticks, stable ball/pocket identifiers, stable pair iteration, canonical event sorting, complete versioned snapshots, and bounded shot/event limits. The profile is immutable and serialized into every canonical match snapshot.
 

@@ -54,8 +54,10 @@ check_web_pattern() {
 check_web_pattern "legacy browser match transport" '(/ws\?|connect_match_socket|disconnect_match_socket|match_socket_ready|match_socket_needs_reconnect|match_socket_retry_delay_ms|match_has_pending_prediction|set_match_player|refreshMatchAccess|/connections/|/api/matches/\$\{matchId\}`)'
 
 check_pattern "application-owned raw SQL" '(SELECT[[:space:]]|INSERT[[:space:]]+INTO|UPDATE[[:space:]]+[[:alnum:]_]+[[:space:]]+SET|DELETE[[:space:]]+FROM|CREATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE)' packages
-check_pattern "game-domain infrastructure dependency" '(^|[^[:alnum:]_])(bevy|lightyear|switchy[_-][[:alnum:]_]*|actix[-_][[:alnum:]_]*|axum|database|http|websocket|tokio)([^[:alnum:]_]|$)' packages/game_domain
-check_pattern "game-domain client authority vocabulary" '(ClientAuthoritative|client_authoritative|ReportedBallState|reported_ball_state)' packages/game_domain
+for domain in packages/billiards packages/eight_ball; do
+    check_pattern "game-domain infrastructure dependency" '(^|[^[:alnum:]_])(bevy|lightyear|switchy[_-][[:alnum:]_]*|actix[-_][[:alnum:]_]*|axum|database|http|websocket|tokio)([^[:alnum:]_]|$)' "$domain"
+    check_pattern "game-domain client authority vocabulary" '(ClientAuthoritative|client_authoritative|ReportedBallState|reported_ball_state)' "$domain"
+done
 check_pattern "timeout forfeiture behavior" '(timeout|Timeout).*(forfeit|Forfeit|automatic_loss|AutomaticLoss)' packages
 check_pattern "unversioned canonical payload marker" 'Canonical(Payload|Snapshot|Command)[[:space:]]*\{' packages
 check_pattern "plaintext secret persistence field" '(session_token|invitation_token)[[:space:]]*:' packages/server

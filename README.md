@@ -20,7 +20,7 @@ Read `INVARIANTS.md` for durable architecture and `AGENTS.md` for contributor re
 
 ## Development
 
-The workspace contains the concrete `pwmtf_game_domain`, `pwmtf_protocol`, `pwmtf_server`, and `pwmtf_client` packages. Use:
+The workspace contains `pwmtf_billiards` (deterministic physics), `pwmtf_eight_ball` (rules), `pwmtf_protocol`, `pwmtf_server`, and `pwmtf_client`. Use:
 
 ```sh
 cargo fmt --check

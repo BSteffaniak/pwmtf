@@ -1,6 +1,6 @@
 # PWMTF server
 
-This package owns authoritative command authorization, revision/idempotency enforcement, durable acceptance, scheduling, recovery, identity, social/lobby/rematch persistence, and native HTTP/OIDC/secure-WebSocket operations. Canonical gameplay decisions remain in `pwmtf_game_domain`; this package authenticates and durably orchestrates them. A rejected WebSocket command receives a typed `Rejected { reason }` followed by the current complete authoritative state, allowing the client to roll back prediction without dropping a healthy connection.
+This package owns authoritative command authorization, revision/idempotency enforcement, durable acceptance, scheduling, recovery, identity, social/lobby/rematch persistence, and native HTTP/OIDC/secure-WebSocket operations. Canonical gameplay decisions remain in `pwmtf_billiards` and `pwmtf_eight_ball`; this package authenticates and durably orchestrates them. A rejected WebSocket command receives a typed `Rejected { reason }` followed by the current complete authoritative state, allowing the client to roll back prediction without dropping a healthy connection.
 
 ## Session socket (`GET /ws`, session version 2)
 

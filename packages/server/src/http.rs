@@ -1223,7 +1223,7 @@ fn match_access_response(
     participants: Participants,
     actor: AccountId,
     revision: u64,
-    state: &pwmtf_game_domain::MatchState,
+    state: &pwmtf_eight_ball::MatchState,
     deadline: Option<crate::ScheduledDeadline>,
     server_time_ms: u64,
 ) -> Result<MatchAccessResponse, TransportError> {
@@ -1234,7 +1234,7 @@ fn match_access_response(
     } else {
         return Err(TransportError::InvalidSubscription);
     };
-    let completed = matches!(state.status(), pwmtf_game_domain::MatchStatus::Completed(_));
+    let completed = matches!(state.status(), pwmtf_eight_ball::MatchStatus::Completed(_));
     Ok(MatchAccessResponse {
         player,
         revision,
@@ -1242,8 +1242,8 @@ fn match_access_response(
             0
         } else {
             match state.active_player() {
-                pwmtf_game_domain::Player::One => 1,
-                pwmtf_game_domain::Player::Two => 2,
+                pwmtf_eight_ball::Player::One => 1,
+                pwmtf_eight_ball::Player::Two => 2,
             }
         },
         completed,
@@ -1330,7 +1330,7 @@ async fn accept_rematch_offer(
         previous_match_id,
         new_match_id,
         actor,
-        pwmtf_game_domain::RackSeed::new(random_u64()?),
+        pwmtf_billiards::RackSeed::new(random_u64()?),
         crate::DeadlineMillis::new(now),
     )
     .await?;
@@ -1574,16 +1574,16 @@ mod tests {
         let deadline = crate::ScheduledDeadline {
             id: crate::DeadlineId {
                 revision: 4,
-                player: pwmtf_game_domain::Player::One,
+                player: pwmtf_eight_ball::Player::One,
             },
             due_at: crate::DeadlineMillis::new(9_000),
         };
-        let mut state = pwmtf_game_domain::MatchState::new(
-            pwmtf_game_domain::RulesProfile::standard(),
-            pwmtf_game_domain::PhysicsProfile::standard(),
-            pwmtf_game_domain::TableGeometry::standard(),
-            pwmtf_game_domain::RackSeed::new(3),
-            pwmtf_game_domain::Player::One,
+        let mut state = pwmtf_eight_ball::MatchState::new(
+            pwmtf_eight_ball::RulesProfile::standard(),
+            pwmtf_billiards::PhysicsProfile::standard(),
+            pwmtf_billiards::TableGeometry::standard(),
+            pwmtf_billiards::RackSeed::new(3),
+            pwmtf_eight_ball::Player::One,
         )
         .unwrap();
         let response = match_access_response(
@@ -1611,7 +1611,7 @@ mod tests {
             match_access_response(participants, AccountId::new(3), 0, &state, None, 8_000),
             Err(TransportError::InvalidSubscription)
         ));
-        state.concede(pwmtf_game_domain::Player::Two).unwrap();
+        state.concede(pwmtf_eight_ball::Player::Two).unwrap();
         let terminal =
             match_access_response(participants, AccountId::new(1), 5, &state, None, 8_000).unwrap();
         assert!(terminal.completed);

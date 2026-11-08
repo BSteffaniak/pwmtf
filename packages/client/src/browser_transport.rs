@@ -231,7 +231,7 @@ fn js_error(error: &TransportClientError) -> JsValue {
 /// Returns a JavaScript exception when the session refuses the command.
 pub fn submit_cue_ball_placement(
     command_id: pwmtf_protocol::CommandId,
-    position: pwmtf_game_domain::Vector,
+    position: pwmtf_billiards::Vector,
 ) -> Result<(), JsValue> {
     with_mut(|transport| transport.submit_cue_ball_placement(command_id, position))
         .map_err(|error| js_error(&error))
@@ -244,8 +244,8 @@ pub fn submit_cue_ball_placement(
 /// Returns a JavaScript exception when the session refuses the command.
 pub fn submit_shot(
     command_id: pwmtf_protocol::CommandId,
-    shot: pwmtf_game_domain::VersionedShotCommand,
-    called_pocket: Option<pwmtf_game_domain::PocketId>,
+    shot: pwmtf_billiards::VersionedShotCommand,
+    called_pocket: Option<pwmtf_billiards::PocketId>,
 ) -> Result<(), JsValue> {
     with_mut(|transport| transport.submit_shot(command_id, shot, called_pocket))
         .map_err(|error| js_error(&error))
@@ -258,7 +258,7 @@ pub fn submit_shot(
 /// Returns a JavaScript exception when the session refuses the command.
 pub fn submit_concession(
     command_id: pwmtf_protocol::CommandId,
-    player: pwmtf_game_domain::Player,
+    player: pwmtf_eight_ball::Player,
 ) -> Result<(), JsValue> {
     with_mut(|transport| transport.submit_concession(command_id, player))
         .map_err(|error| js_error(&error))
@@ -278,13 +278,13 @@ pub fn calling_eight() -> bool {
 }
 
 /// Records the local player's 8-ball call for this turn.
-pub fn set_called_pocket(pocket: pwmtf_game_domain::PocketId) {
+pub fn set_called_pocket(pocket: pwmtf_billiards::PocketId) {
     with_mut(|transport| transport.set_called_pocket(pocket));
 }
 
 /// The local player's 8-ball call for this turn, if made.
 #[must_use]
-pub fn called_pocket() -> Option<pwmtf_game_domain::PocketId> {
+pub fn called_pocket() -> Option<pwmtf_billiards::PocketId> {
     with(SessionTransport::called_pocket)
 }
 
@@ -295,7 +295,7 @@ pub fn request_pocket_call() {
 
 /// Where the cue starts this turn, identically on both screens.
 #[must_use]
-pub fn turn_start_aim() -> Option<pwmtf_game_domain::Aim> {
+pub fn turn_start_aim() -> Option<pwmtf_billiards::Aim> {
     with(SessionTransport::turn_start_aim)
 }
 
@@ -373,9 +373,9 @@ pub fn predicted_checksum() -> Option<u64> {
 /// Returns an isolated solver input for optional exact aiming previews.
 #[must_use]
 pub fn preview_state() -> Option<(
-    pwmtf_game_domain::VersionedTableState,
-    pwmtf_game_domain::PhysicsProfile,
-    pwmtf_game_domain::TableGeometry,
+    pwmtf_billiards::VersionedTableState,
+    pwmtf_billiards::PhysicsProfile,
+    pwmtf_billiards::TableGeometry,
 )> {
     with(SessionTransport::preview_state)
 }

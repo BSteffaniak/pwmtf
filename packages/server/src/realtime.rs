@@ -22,7 +22,7 @@ use std::{
 };
 
 use axum::extract::ws::{Message, WebSocket};
-use pwmtf_game_domain::{MatchCommand, MatchStatus, Player, VersionedMatchCommand};
+use pwmtf_eight_ball::{MatchCommand, MatchStatus, Player, VersionedMatchCommand};
 use pwmtf_protocol::{
     ClientMessage, CommandEnvelope, LastCommand, MAX_SNAPSHOT_BYTES, MatchStateMessage,
     RejectReason, SESSION_VERSION, ServerMessage, ShotPreview, SubscriptionKind, negotiate_version,
@@ -208,7 +208,7 @@ impl MatchUnit {
     ) -> Option<(
         Participants,
         u64,
-        pwmtf_game_domain::MatchState,
+        pwmtf_eight_ball::MatchState,
         Option<ScheduledDeadline>,
     )> {
         let service = self.authority.lock().await;
@@ -815,11 +815,11 @@ impl HttpState {
             return Ok(None);
         }
         let now = crate::http::unix_millis()?;
-        let state = pwmtf_game_domain::MatchState::new(
-            pwmtf_game_domain::RulesProfile::standard(),
-            pwmtf_game_domain::PhysicsProfile::standard(),
-            pwmtf_game_domain::TableGeometry::standard(),
-            pwmtf_game_domain::RackSeed::new(crate::http::random_u64()?),
+        let state = pwmtf_eight_ball::MatchState::new(
+            pwmtf_eight_ball::RulesProfile::standard(),
+            pwmtf_billiards::PhysicsProfile::standard(),
+            pwmtf_billiards::TableGeometry::standard(),
+            pwmtf_billiards::RackSeed::new(crate::http::random_u64()?),
             Player::One,
         )
         .map_err(|_| TransportError::Internal)?;

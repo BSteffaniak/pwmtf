@@ -16,7 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 bevy              = { workspace = true }
-pwmtf_game_domain = { path = "../game_domain", version = "0.1.0" }
+pwmtf_billiards = { path = "../billiards", version = "0.1.0" }
+pwmtf_eight_ball = { path = "../eight_ball", version = "0.1.0" }
 pwmtf_protocol    = { path = "../protocol", version = "0.1.0" }
 thiserror         = { workspace = true }
 

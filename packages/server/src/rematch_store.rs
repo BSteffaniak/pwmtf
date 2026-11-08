@@ -1,7 +1,8 @@
 //! Durable rematch offer/acceptance and linked-match creation.
 
 use crate::{AccountId, DeadlineId, DeadlineMillis, MatchId, Participants, ScheduledDeadline};
-use pwmtf_game_domain::{MatchConfiguration, MatchState, RackSeed, RematchMetadata};
+use pwmtf_billiards::RackSeed;
+use pwmtf_eight_ball::{MatchConfiguration, MatchState, RematchMetadata};
 use switchy_database::{
     Database, DatabaseValue,
     query::{FilterableQuery as _, SortDirection},
@@ -335,10 +336,10 @@ fn to_i64(value: u64) -> Result<i64, RematchStoreError> {
     i64::try_from(value).map_err(|_| RematchStoreError::Overflow)
 }
 
-const fn encode_player(player: pwmtf_game_domain::Player) -> i64 {
+const fn encode_player(player: pwmtf_eight_ball::Player) -> i64 {
     match player {
-        pwmtf_game_domain::Player::One => 1,
-        pwmtf_game_domain::Player::Two => 2,
+        pwmtf_eight_ball::Player::One => 1,
+        pwmtf_eight_ball::Player::Two => 2,
     }
 }
 
@@ -377,9 +378,8 @@ const fn checksum_i64(value: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use futures_lite::future::block_on;
-    use pwmtf_game_domain::{
-        MatchCommand, PhysicsProfile, Player, RulesProfile, TableGeometry, VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{PhysicsProfile, TableGeometry};
+    use pwmtf_eight_ball::{MatchCommand, Player, RulesProfile, VersionedMatchCommand};
 
     use super::*;
 

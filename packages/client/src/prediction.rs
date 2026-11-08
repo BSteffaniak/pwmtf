@@ -1,8 +1,7 @@
 //! Client-owned prediction, authoritative reconciliation, and interpolation.
 
-use pwmtf_game_domain::{
-    MatchCommand, MatchError, MatchState, Vector, VersionedMatchCommand, VersionedShotCommand,
-};
+use pwmtf_billiards::{Vector, VersionedShotCommand};
+use pwmtf_eight_ball::{MatchCommand, MatchError, MatchState, VersionedMatchCommand};
 use pwmtf_protocol::{CommandEnvelope, CommandId, ProtocolError, SnapshotEnvelope};
 use thiserror::Error;
 
@@ -153,14 +152,14 @@ impl PredictionState {
         &mut self,
         command_id: CommandId,
         shot: VersionedShotCommand,
-        called_pocket: Option<pwmtf_game_domain::PocketId>,
+        called_pocket: Option<pwmtf_billiards::PocketId>,
     ) -> Result<CommandEnvelope, PredictionError> {
         if self.pending.is_some() {
             return Err(PredictionError::PendingCommand);
         }
         if !matches!(
             self.predicted.status(),
-            pwmtf_game_domain::MatchStatus::InProgress
+            pwmtf_eight_ball::MatchStatus::InProgress
         ) {
             return Err(MatchError::Completed.into());
         }
@@ -221,7 +220,7 @@ impl PredictionState {
     pub fn predict_concession(
         &mut self,
         command_id: CommandId,
-        player: pwmtf_game_domain::Player,
+        player: pwmtf_eight_ball::Player,
     ) -> Result<CommandEnvelope, PredictionError> {
         self.predict_command(
             command_id,
@@ -341,10 +340,8 @@ fn interpolation_samples(from: &MatchState, to: &MatchState) -> Vec<BallSample> 
 #[cfg(test)]
 mod tests {
     use futures_lite::future::block_on;
-    use pwmtf_game_domain::{
-        Aim, PhysicsProfile, Player, RackSeed, RulesProfile, ShotPower, Spin, TableGeometry,
-        VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{Aim, PhysicsProfile, RackSeed, ShotPower, Spin, TableGeometry};
+    use pwmtf_eight_ball::{Player, RulesProfile, VersionedMatchCommand};
     use pwmtf_server::{
         AcceptedCommand, AccountId, CommandJournal, DeadlineMillis, JournalError, MatchId,
         MatchService, Participants,
@@ -548,7 +545,7 @@ mod tests {
                 MatchState::from_bytes(&completed.snapshot)
                     .unwrap()
                     .status(),
-                pwmtf_game_domain::MatchStatus::Completed(_)
+                pwmtf_eight_ball::MatchStatus::Completed(_)
             ));
             assert_eq!(
                 shooter.reconcile(&completed).unwrap(),
@@ -580,7 +577,7 @@ mod tests {
         ));
         assert!(matches!(
             prediction.predicted().status(),
-            pwmtf_game_domain::MatchStatus::Completed(_)
+            pwmtf_eight_ball::MatchStatus::Completed(_)
         ));
     }
 
@@ -595,7 +592,7 @@ mod tests {
             .table()
             .balls()
             .iter()
-            .find(|ball| ball.id == pwmtf_game_domain::BallId::CUE)
+            .find(|ball| ball.id == pwmtf_billiards::BallId::CUE)
             .unwrap()
             .position;
         let envelope = prediction

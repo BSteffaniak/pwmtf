@@ -261,7 +261,7 @@ async fn backfill_match_configurations(db: &dyn Database) -> switchy_schema::Res
         }
         let match_id = migration_text(&row, "match_id")?;
         let snapshot = migration_decode(&migration_text(&row, "canonical_snapshot")?)?;
-        let state = pwmtf_game_domain::MatchState::from_bytes(&snapshot).map_err(|_| {
+        let state = pwmtf_eight_ball::MatchState::from_bytes(&snapshot).map_err(|_| {
             switchy_schema::MigrationError::Validation(
                 "canonical match snapshot is incompatible".to_owned(),
             )
@@ -472,9 +472,8 @@ mod tests {
     #[test]
     fn existing_match_rows_receive_pinned_configuration_on_upgrade() {
         block_on(async {
-            use pwmtf_game_domain::{
-                MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
-            };
+            use pwmtf_billiards::{PhysicsProfile, RackSeed, TableGeometry};
+            use pwmtf_eight_ball::{MatchState, Player, RulesProfile};
 
             let db = switchy_database_connection::builder()
                 .turso()

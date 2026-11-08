@@ -3,10 +3,8 @@
 #![allow(clippy::multiple_crate_versions)]
 //! Bounded, explicitly versioned PWMTF wire representations.
 
-use pwmtf_game_domain::{
-    Aim, MatchCommand, PocketId, ShotPower, Spin, Vector, VersionedMatchCommand,
-    VersionedShotCommand,
-};
+use pwmtf_billiards::{Aim, PocketId, ShotPower, Spin, Vector, VersionedShotCommand};
+use pwmtf_eight_ball::{MatchCommand, VersionedMatchCommand};
 use thiserror::Error;
 
 mod session;
@@ -189,7 +187,7 @@ impl CommandEnvelope {
         let expected_revision = reader.u64()?;
         let command_id = CommandId::new(reader.array()?);
         let command_version = reader.u16()?;
-        if command_version != pwmtf_game_domain::MATCH_COMMAND_VERSION {
+        if command_version != pwmtf_eight_ball::MATCH_COMMAND_VERSION {
             return Err(ProtocolError::UnsupportedCommand(command_version));
         }
         let command = decode_command(&mut reader)?;
@@ -383,8 +381,8 @@ fn encode_command(command: MatchCommand, bytes: &mut Vec<u8>) {
         MatchCommand::Concede { player } => {
             bytes.push(3);
             bytes.push(match player {
-                pwmtf_game_domain::Player::One => 1,
-                pwmtf_game_domain::Player::Two => 2,
+                pwmtf_eight_ball::Player::One => 1,
+                pwmtf_eight_ball::Player::Two => 2,
             });
         }
         MatchCommand::PlaceCueBall { position } => {
@@ -425,8 +423,8 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<MatchCommand, ProtocolError
         2 => Ok(MatchCommand::Timeout),
         3 => {
             let player = match reader.u8()? {
-                1 => pwmtf_game_domain::Player::One,
-                2 => pwmtf_game_domain::Player::Two,
+                1 => pwmtf_eight_ball::Player::One,
+                2 => pwmtf_eight_ball::Player::Two,
                 value => return Err(ProtocolError::InvalidDiscriminant(value)),
             };
             Ok(MatchCommand::Concede { player })
@@ -531,7 +529,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use pwmtf_game_domain::{Player, VersionedMatchCommand};
+    use pwmtf_eight_ball::{Player, VersionedMatchCommand};
 
     use super::*;
 

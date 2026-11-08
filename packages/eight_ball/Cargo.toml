@@ -1,0 +1,19 @@
+[package]
+authors     = { workspace = true }
+categories  = ["games", "simulation"]
+description = "Authoritative 8-ball rules on deterministic billiards physics"
+edition     = { workspace = true }
+keywords    = ["8-ball", "billiards", "game", "pool", "rules"]
+license     = { workspace = true }
+name        = "pwmtf_eight_ball"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[dependencies]
+pwmtf_billiards = { path = "../billiards", version = "0.1.0" }
+thiserror       = { workspace = true }
+
+[features]
+default          = []
+fail-on-warnings = []

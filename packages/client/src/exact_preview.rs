@@ -1,6 +1,6 @@
 //! Bounded, incremental previews using the canonical solver, never authority.
 use bevy::prelude::*;
-use pwmtf_game_domain::{
+use pwmtf_billiards::{
     PhysicsProfile, TableGeometry, VersionedShotCommand, VersionedTableState, advance_tick,
     start_shot,
 };
@@ -67,8 +67,8 @@ fn average_paths(samples: &[(u8, Vec2, Vec2)]) -> Vec<(u8, Vec2, Vec2)> {
 
 // Tick endpoints include collision response and overlap correction. Exclude the
 // whole tick on secondary contact, rather than averaging its post-impact motion.
-fn stop_colliding_paths(stopped: &mut [bool; 16], events: &[pwmtf_game_domain::SimulationEvent]) {
-    use pwmtf_game_domain::SimulationEventKind;
+fn stop_colliding_paths(stopped: &mut [bool; 16], events: &[pwmtf_billiards::SimulationEvent]) {
+    use pwmtf_billiards::SimulationEventKind;
     for event in events {
         match event.kind {
             SimulationEventKind::BallContact { first, second } => {
@@ -168,7 +168,7 @@ impl ExactPreview {
             }
             if self.contact.is_none() {
                 for event in &result.events {
-                    if let pwmtf_game_domain::SimulationEventKind::BallContact { first, second } =
+                    if let pwmtf_billiards::SimulationEventKind::BallContact { first, second } =
                         event.kind
                         && (first.number() == 0 || second.number() == 0)
                     {
@@ -185,7 +185,7 @@ impl ExactPreview {
                             .map(|ball| crate::canonical_to_world(ball.position));
                         break;
                     }
-                    if matches!(event.kind, pwmtf_game_domain::SimulationEventKind::CushionContact { ball, .. } if ball.number() == 0)
+                    if matches!(event.kind, pwmtf_billiards::SimulationEventKind::CushionContact { ball, .. } if ball.number() == 0)
                     {
                         self.contact = result
                             .state
@@ -237,7 +237,7 @@ impl ExactPreview {
         }
     }
 
-    fn stop_same_tick_contacts(&mut self, events: &[pwmtf_game_domain::SimulationEvent]) {
+    fn stop_same_tick_contacts(&mut self, events: &[pwmtf_billiards::SimulationEvent]) {
         // Events within a tick are canonicalized, so when another
         // contact shares the initiating tick there is no safe free
         // flight to average for its participants.
@@ -245,7 +245,7 @@ impl ExactPreview {
         for event in events {
             if !skipped_initial
                 && matches!(event.kind,
-                        pwmtf_game_domain::SimulationEventKind::BallContact { first, second }
+                        pwmtf_billiards::SimulationEventKind::BallContact { first, second }
                         if first.number() == 0 || second.number() == 0)
             {
                 skipped_initial = true;
@@ -312,8 +312,7 @@ mod tests {
     fn compact_range_gates_outgoing_lines_and_marker_but_not_incoming() {
         let geometry = TableGeometry::standard();
         let table =
-            pwmtf_game_domain::standard_rack(geometry, pwmtf_game_domain::RackSeed::new(42))
-                .unwrap();
+            pwmtf_billiards::standard_rack(geometry, pwmtf_billiards::RackSeed::new(42)).unwrap();
         let origin = crate::canonical_to_world(table.balls()[0].position);
         let mut preview = ExactPreview {
             key: Some((
@@ -342,7 +341,7 @@ mod tests {
 
     #[test]
     fn secondary_contacts_stop_only_involved_paths_and_stay_stopped() {
-        use pwmtf_game_domain::{BallId, CushionAxis, SimulationEvent, SimulationEventKind};
+        use pwmtf_billiards::{BallId, CushionAxis, SimulationEvent, SimulationEventKind};
         let mut stopped = [false; 16];
         stop_colliding_paths(
             &mut stopped,
@@ -392,8 +391,7 @@ mod tests {
         let physics = PhysicsProfile::standard();
         let geometry = TableGeometry::standard();
         let table =
-            pwmtf_game_domain::standard_rack(geometry, pwmtf_game_domain::RackSeed::new(42))
-                .unwrap();
+            pwmtf_billiards::standard_rack(geometry, pwmtf_billiards::RackSeed::new(42)).unwrap();
         let command = crate::practice_shot(&crate::PrototypeInput::default());
         let mut preview = ExactPreview {
             moving: start_shot(physics, table, command).ok(),
@@ -411,8 +409,7 @@ mod tests {
         let physics = PhysicsProfile::standard();
         let geometry = TableGeometry::standard();
         let table =
-            pwmtf_game_domain::standard_rack(geometry, pwmtf_game_domain::RackSeed::new(42))
-                .unwrap();
+            pwmtf_billiards::standard_rack(geometry, pwmtf_billiards::RackSeed::new(42)).unwrap();
         let command = crate::practice_shot(&crate::PrototypeInput::default());
         let published = vec![(0, Vec2::ZERO, Vec2::X)];
         let mut preview = ExactPreview {

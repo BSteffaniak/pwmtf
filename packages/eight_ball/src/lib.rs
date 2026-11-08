@@ -1,6 +1,10 @@
-//! Versioned authoritative 8-ball match transitions.
+#![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
+#![allow(clippy::multiple_crate_versions)]
+//! Versioned authoritative 8-ball match transitions on `pwmtf_billiards`
+//! physics: groups, fouls, called 8, timeouts, concessions and rematches.
 
-use crate::{
+use pwmtf_billiards::{
     BallId, BallState, PhysicsProfile, PocketId, RackError, RackSeed, SimulationError,
     SimulationEventKind, TableGeometry, Vector, VersionedShotCommand, VersionedTableState,
     simulate_shot, standard_rack,
@@ -1195,13 +1199,13 @@ pub enum MatchDecodeError {
     Rules(#[from] RulesProfileError),
     /// Physics profile is invalid or unsupported.
     #[error(transparent)]
-    Physics(#[from] crate::PhysicsProfileError),
+    Physics(#[from] pwmtf_billiards::PhysicsProfileError),
     /// Table geometry is invalid or unsupported.
     #[error(transparent)]
-    Geometry(#[from] crate::GeometryError),
+    Geometry(#[from] pwmtf_billiards::GeometryError),
     /// Canonical table state is malformed.
     #[error(transparent)]
-    Table(#[from] crate::TableStateDecodeError),
+    Table(#[from] pwmtf_billiards::TableStateDecodeError),
 }
 
 struct MatchReader<'a> {
@@ -1271,10 +1275,10 @@ fn encode_geometry(value: TableGeometry, bytes: &mut Vec<u8>) {
 fn decode_geometry(reader: &mut MatchReader<'_>) -> Result<TableGeometry, MatchDecodeError> {
     Ok(TableGeometry::new(
         reader.u16()?,
-        crate::Scalar::from_micros(reader.i64()?),
-        crate::Scalar::from_micros(reader.i64()?),
-        crate::Scalar::from_micros(reader.i64()?),
-        crate::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
     )?)
 }
 
@@ -1299,11 +1303,11 @@ fn decode_physics(reader: &mut MatchReader<'_>) -> Result<PhysicsProfile, MatchD
         reader.u16()?,
         reader.u16()?,
         reader.u32()?,
-        crate::Scalar::from_micros(reader.i64()?),
-        crate::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
         reader.u32()?,
         reader.u32()?,
-        crate::Scalar::from_micros(reader.i64()?),
+        pwmtf_billiards::Scalar::from_micros(reader.i64()?),
     )?)
 }
 
@@ -1389,7 +1393,7 @@ fn derive_rerack_seed(seed: u64, rerack_count: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Aim, ShotPower, Spin};
+    use pwmtf_billiards::{Aim, ShotPower, Spin};
 
     use super::*;
 
@@ -1458,14 +1462,17 @@ mod tests {
 
     fn side_pocket_state(object_ball: u8) -> VersionedTableState {
         VersionedTableState::new(
-            crate::TABLE_STATE_VERSION,
+            pwmtf_billiards::TABLE_STATE_VERSION,
             TableGeometry::standard(),
             0,
             vec![
-                crate::BallState::stationary(BallId::CUE, crate::Vector::from_micros(0, 200_000)),
-                crate::BallState::stationary(
+                pwmtf_billiards::BallState::stationary(
+                    BallId::CUE,
+                    pwmtf_billiards::Vector::from_micros(0, 200_000),
+                ),
+                pwmtf_billiards::BallState::stationary(
                     BallId::new(object_ball).unwrap(),
-                    crate::Vector::from_micros(0, 450_000),
+                    pwmtf_billiards::Vector::from_micros(0, 450_000),
                 ),
             ],
         )
@@ -1474,20 +1481,25 @@ mod tests {
 
     fn cleared_solids_eight_ball_state() -> VersionedTableState {
         let mut balls = vec![
-            crate::BallState::stationary(BallId::CUE, crate::Vector::from_micros(0, 200_000)),
-            crate::BallState::stationary(
+            pwmtf_billiards::BallState::stationary(
+                BallId::CUE,
+                pwmtf_billiards::Vector::from_micros(0, 200_000),
+            ),
+            pwmtf_billiards::BallState::stationary(
                 BallId::new(8).unwrap(),
-                crate::Vector::from_micros(0, 450_000),
+                pwmtf_billiards::Vector::from_micros(0, 450_000),
             ),
         ];
         for number in 1..=7 {
-            let mut ball =
-                crate::BallState::stationary(BallId::new(number).unwrap(), crate::Vector::ZERO);
+            let mut ball = pwmtf_billiards::BallState::stationary(
+                BallId::new(number).unwrap(),
+                pwmtf_billiards::Vector::ZERO,
+            );
             ball.pocketed = true;
             balls.push(ball);
         }
         VersionedTableState::new(
-            crate::TABLE_STATE_VERSION,
+            pwmtf_billiards::TABLE_STATE_VERSION,
             TableGeometry::standard(),
             0,
             balls,
@@ -1501,7 +1513,7 @@ mod tests {
         let commands = [
             VersionedMatchCommand::new(MatchCommand::Timeout),
             VersionedMatchCommand::new(MatchCommand::PlaceCueBall {
-                position: crate::Vector::from_micros(-600_000, 100_000),
+                position: pwmtf_billiards::Vector::from_micros(-600_000, 100_000),
             }),
             VersionedMatchCommand::new(MatchCommand::PlayShot {
                 shot: command(0, 0),
@@ -1590,7 +1602,7 @@ mod tests {
     fn match_snapshot_round_trip_preserves_checksum_and_continuation() {
         let mut game = match_state();
         game.timeout_turn().unwrap();
-        game.place_cue_ball(crate::Vector::from_micros(-600_000, 100_000))
+        game.place_cue_ball(pwmtf_billiards::Vector::from_micros(-600_000, 100_000))
             .unwrap();
         let bytes = game.to_bytes();
         let restored = MatchState::from_bytes(&bytes).unwrap();
@@ -1627,21 +1639,21 @@ mod tests {
     fn ball_in_hand_placement_is_validated_and_consumed() {
         let mut game = match_state();
         assert_eq!(
-            game.place_cue_ball(crate::Vector::ZERO),
+            game.place_cue_ball(pwmtf_billiards::Vector::ZERO),
             Err(MatchError::BallInHandUnavailable)
         );
         game.timeout_turn().unwrap();
         assert_eq!(
-            game.place_cue_ball(crate::Vector::from_micros(2_000_000, 0)),
+            game.place_cue_ball(pwmtf_billiards::Vector::from_micros(2_000_000, 0)),
             Err(MatchError::InvalidCuePlacement)
         );
         assert!(game.ball_in_hand());
-        game.place_cue_ball(crate::Vector::from_micros(-600_000, 100_000))
+        game.place_cue_ball(pwmtf_billiards::Vector::from_micros(-600_000, 100_000))
             .unwrap();
         assert!(!game.ball_in_hand());
         assert_eq!(
             game.table().ball(BallId::CUE).unwrap().position,
-            crate::Vector::from_micros(-600_000, 100_000)
+            pwmtf_billiards::Vector::from_micros(-600_000, 100_000)
         );
     }
 
@@ -1666,12 +1678,18 @@ mod tests {
     fn break_uses_canonical_contact_and_rail_foul_precedence() {
         let mut game = match_state();
         game.table = VersionedTableState::new(
-            crate::TABLE_STATE_VERSION,
+            pwmtf_billiards::TABLE_STATE_VERSION,
             TableGeometry::standard(),
             0,
             vec![
-                crate::BallState::stationary(BallId::CUE, crate::Vector::from_micros(-400_000, 0)),
-                crate::BallState::stationary(BallId::new(1).unwrap(), crate::Vector::ZERO),
+                pwmtf_billiards::BallState::stationary(
+                    BallId::CUE,
+                    pwmtf_billiards::Vector::from_micros(-400_000, 0),
+                ),
+                pwmtf_billiards::BallState::stationary(
+                    BallId::new(1).unwrap(),
+                    pwmtf_billiards::Vector::ZERO,
+                ),
             ],
         )
         .unwrap();
@@ -1718,12 +1736,12 @@ mod tests {
         let mut game = match_state();
         game.break_pending = false;
         game.table = VersionedTableState::new(
-            crate::TABLE_STATE_VERSION,
+            pwmtf_billiards::TABLE_STATE_VERSION,
             TableGeometry::standard(),
             0,
-            vec![crate::BallState::stationary(
+            vec![pwmtf_billiards::BallState::stationary(
                 BallId::CUE,
-                crate::Vector::from_micros(0, 500_000),
+                pwmtf_billiards::Vector::from_micros(0, 500_000),
             )],
         )
         .unwrap();
@@ -1853,7 +1871,7 @@ mod tests {
                 called_pocket: None,
             }),
             VersionedMatchCommand::new(MatchCommand::PlaceCueBall {
-                position: crate::Vector::from_micros(-600_000, 100_000),
+                position: pwmtf_billiards::Vector::from_micros(-600_000, 100_000),
             }),
             VersionedMatchCommand::new(MatchCommand::Timeout),
             VersionedMatchCommand::new(MatchCommand::Concede {
@@ -1882,9 +1900,9 @@ mod tests {
     fn playback_millis_rounds_up_whole_milliseconds() {
         let physics = PhysicsProfile::standard();
         assert_eq!(physics.ticks_per_second(), 240);
-        assert_eq!(crate::playback_millis(physics, 0), 0);
-        assert_eq!(crate::playback_millis(physics, 1), 5);
-        assert_eq!(crate::playback_millis(physics, 240), 1_000);
+        assert_eq!(pwmtf_billiards::playback_millis(physics, 0), 0);
+        assert_eq!(pwmtf_billiards::playback_millis(physics, 1), 5);
+        assert_eq!(pwmtf_billiards::playback_millis(physics, 240), 1_000);
         assert_eq!(physics.playback_millis(241), 1_005);
         assert_eq!(
             physics.playback_millis(u32::MAX),
@@ -1899,5 +1917,50 @@ mod tests {
             RulesProfile::new(2),
             Err(RulesProfileError::UnsupportedVersion(2))
         );
+    }
+}
+
+/// Stored PWMTF matches depend on these exact encodings; a change here must
+/// be a deliberate, versioned format change, never a side effect.
+#[cfg(test)]
+mod golden_encoding {
+    use super::*;
+    use pwmtf_billiards::{Aim, ShotPower, Spin, TableGeometry, VersionedShotCommand};
+
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    fn standard_profile_encodings_are_byte_stable() {
+        let mut state = MatchState::new(
+            RulesProfile::standard(),
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            RackSeed::new(42),
+            Player::One,
+        )
+        .unwrap();
+        let initial = state.to_bytes();
+        assert_eq!(
+            (initial.len(), fnv(&initial)),
+            (1_035, 0x4cf2_40e5_361f_9e4d)
+        );
+        let result = state
+            .apply_command(VersionedMatchCommand::new(MatchCommand::PlayShot {
+                shot: VersionedShotCommand::new(
+                    Aim::new(0).unwrap(),
+                    ShotPower::new(9_000).unwrap(),
+                    Spin::CENTER,
+                ),
+                called_pocket: None,
+            }))
+            .unwrap();
+        let after = state.to_bytes();
+        assert_eq!((after.len(), fnv(&after)), (1_035, 0x3aa8_a580_b61a_ad23));
+        assert_eq!(fnv(&result.to_bytes()), 0x3017_c9ed_457d_3712);
+        assert_eq!(state.checksum(), 0x3aa8_a580_b61a_ad23);
     }
 }

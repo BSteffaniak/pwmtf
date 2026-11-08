@@ -1,7 +1,8 @@
 [workspace]
 members = [
+    "packages/billiards",
     "packages/client",
-    "packages/game_domain",
+    "packages/eight_ball",
     "packages/protocol",
     "packages/server",
 ]

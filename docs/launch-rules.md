@@ -1,6 +1,6 @@
 # PWMTF launch rules evidence
 
-This record distinguishes confirmed Miniclip behavior from PWMTF launch-profile decisions. The executable owner is `pwmtf_game_domain`; this document records the source and interpretation used by its fixtures.
+This record distinguishes confirmed Miniclip behavior from PWMTF launch-profile decisions. The executable owner is `pwmtf_eight_ball` (on `pwmtf_billiards` physics); this document records the source and interpretation used by its fixtures.
 
 ## Confirmed Miniclip behavior
 

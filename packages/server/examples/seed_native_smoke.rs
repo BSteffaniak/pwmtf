@@ -2,10 +2,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use pwmtf_game_domain::{
-    Aim, MatchCommand, MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, ShotPower, Spin,
-    TableGeometry, VersionedMatchCommand, VersionedShotCommand,
+use pwmtf_billiards::{
+    Aim, PhysicsProfile, RackSeed, ShotPower, Spin, TableGeometry, VersionedShotCommand,
 };
+use pwmtf_eight_ball::{MatchCommand, MatchState, Player, RulesProfile, VersionedMatchCommand};
 use pwmtf_protocol::{ClientMessage, CommandEnvelope, CommandId, SESSION_VERSION};
 use pwmtf_server::{
     AccountId, DeadlineMillis, MatchId, MatchService, Participants, Session, SessionCookiePolicy,
@@ -84,9 +84,9 @@ async fn run() -> Result<(), SeedError> {
     if head.1 != 2
         || !matches!(
             head.2.status(),
-            pwmtf_game_domain::MatchStatus::Completed(outcome)
+            pwmtf_eight_ball::MatchStatus::Completed(outcome)
                 if outcome.winner == Player::One
-                    && outcome.reason == pwmtf_game_domain::CompletionReason::Concession
+                    && outcome.reason == pwmtf_eight_ball::CompletionReason::Concession
         )
         || head.3.is_some()
     {
@@ -320,7 +320,7 @@ enum SeedError {
     #[error("database write failed")]
     Database(#[from] switchy_database::DatabaseError),
     #[error("canonical match construction failed")]
-    Match(#[from] pwmtf_game_domain::MatchError),
+    Match(#[from] pwmtf_eight_ball::MatchError),
     #[error("authoritative command failed")]
     Command(#[from] pwmtf_server::CommandError),
     #[error("durable journal failed")]

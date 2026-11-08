@@ -10,10 +10,8 @@ use std::{
 };
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use pwmtf_game_domain::{
-    Aim, MatchCommand, MatchState, PhysicsProfile, Player, RulesProfile, ShotPower, Spin,
-    VersionedMatchCommand, VersionedShotCommand,
-};
+use pwmtf_billiards::{Aim, PhysicsProfile, ShotPower, Spin, VersionedShotCommand};
+use pwmtf_eight_ball::{MatchCommand, MatchState, Player, RulesProfile, VersionedMatchCommand};
 use pwmtf_protocol::{
     ClientMessage, CommandEnvelope, CommandId, MatchStateMessage, RejectReason, SESSION_VERSION,
     ServerMessage, ShotPreview, SubscriptionKind,

@@ -1,6 +1,6 @@
 //! Disposable practice state; never participates in multiplayer transport.
 use bevy::prelude::Resource;
-use pwmtf_game_domain::{
+use pwmtf_billiards::{
     BallId, BallState, PhysicsProfile, RackSeed, TableGeometry, Vector, VersionedShotCommand,
     VersionedTableState, standard_rack,
 };
@@ -104,7 +104,7 @@ impl Sandbox {
     /// Interpolates between adjacent physics ticks rather than chasing state.
     pub fn presentation_position(
         &self,
-        id: pwmtf_game_domain::BallId,
+        id: pwmtf_billiards::BallId,
     ) -> Option<bevy::prelude::Vec2> {
         if let Some(playback) = &self.playback {
             let sample = playback.sample(id)?;
@@ -163,7 +163,7 @@ impl Sandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pwmtf_game_domain::{Aim, ShotPower, Spin};
+    use pwmtf_billiards::{Aim, ShotPower, Spin};
 
     #[test]
     fn repeated_shots_settle_without_turns() {

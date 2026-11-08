@@ -5875,13 +5875,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwmtf_billiards"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "pwmtf_client"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "futures-lite",
  "js-sys",
- "pwmtf_game_domain",
+ "pwmtf_billiards",
+ "pwmtf_eight_ball",
  "pwmtf_protocol",
  "pwmtf_server",
  "thiserror 2.0.20",
@@ -5890,9 +5898,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "pwmtf_game_domain"
+name = "pwmtf_eight_ball"
 version = "0.1.0"
 dependencies = [
+ "pwmtf_billiards",
  "thiserror 2.0.20",
 ]
 
@@ -5900,7 +5909,8 @@ dependencies = [
 name = "pwmtf_protocol"
 version = "0.1.0"
 dependencies = [
- "pwmtf_game_domain",
+ "pwmtf_billiards",
+ "pwmtf_eight_ball",
  "thiserror 2.0.20",
 ]
 
@@ -5914,7 +5924,8 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "openidconnect",
- "pwmtf_game_domain",
+ "pwmtf_billiards",
+ "pwmtf_eight_ball",
  "pwmtf_protocol",
  "serde",
  "sha2 0.11.0",

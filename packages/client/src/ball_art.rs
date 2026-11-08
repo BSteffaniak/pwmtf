@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn visual_radius_matches_projected_physics_on_both_axes() {
-        use pwmtf_game_domain::{TableGeometry, Vector};
+        use pwmtf_billiards::{TableGeometry, Vector};
         let radius = TableGeometry::standard().ball_radius().micros();
         let center = crate::canonical_to_world(Vector::ZERO);
         for offset in [
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn canonical_rack_has_no_overlapping_visible_ball_bodies() {
-        use pwmtf_game_domain::{RackSeed, TableGeometry, standard_rack};
+        use pwmtf_billiards::{RackSeed, TableGeometry, standard_rack};
         let rack = standard_rack(TableGeometry::standard(), RackSeed::new(42)).unwrap();
         for (index, ball) in rack.balls().iter().enumerate() {
             for other in &rack.balls()[index + 1..] {

@@ -4,7 +4,7 @@
 //! shot replays bit-exactly with the server. It only drives presentation and
 //! never decides gameplay.
 
-use pwmtf_game_domain::{
+use pwmtf_billiards::{
     BallId, PhysicsProfile, SimulationError, TableGeometry, VersionedShotCommand,
     VersionedTableState, advance_tick, start_shot,
 };
@@ -212,10 +212,8 @@ impl ShotPlayback {
 
 #[cfg(test)]
 mod tests {
-    use pwmtf_game_domain::{
-        Aim, MatchCommand, MatchState, Player, RackSeed, RulesProfile, ShotPower, Spin,
-        VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{Aim, RackSeed, ShotPower, Spin};
+    use pwmtf_eight_ball::{MatchCommand, MatchState, Player, RulesProfile, VersionedMatchCommand};
 
     use super::*;
 

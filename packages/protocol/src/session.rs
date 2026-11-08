@@ -6,7 +6,7 @@
 //! Every decoder fails closed on unknown tags, truncation, trailing bytes,
 //! invalid flags or discriminants, and oversize frames.
 
-use pwmtf_game_domain::{MATCH_COMMAND_VERSION, Player, VersionedMatchCommand};
+use pwmtf_eight_ball::{MATCH_COMMAND_VERSION, Player, VersionedMatchCommand};
 
 use crate::{
     CommandEnvelope, CommandId, MAX_FRAME_BYTES, MAX_NEGOTIATED_VERSIONS, MAX_PREVIEW_FRAME_BYTES,
@@ -648,9 +648,8 @@ const fn decode_flag(value: u8) -> Result<bool, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use pwmtf_game_domain::{
-        Aim, MatchCommand, PocketId, ShotPower, Spin, Vector, VersionedShotCommand,
-    };
+    use pwmtf_billiards::{Aim, PocketId, ShotPower, Spin, Vector, VersionedShotCommand};
+    use pwmtf_eight_ball::MatchCommand;
 
     use super::*;
 

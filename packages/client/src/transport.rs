@@ -7,10 +7,12 @@
 //! performs the [`TransportAction`]s it queues. It never decides gameplay: the
 //! server's `MatchState` is always applied as authority.
 
-use pwmtf_game_domain::{
+use pwmtf_billiards::{
+    PhysicsProfile, PocketId, TableGeometry, Vector, VersionedShotCommand, VersionedTableState,
+};
+use pwmtf_eight_ball::{
     CompletionReason, Foul, Group, MatchCommand, MatchCommandResult, MatchState, MatchStatus,
-    Objective, PhysicsProfile, Player, PocketId, TableGeometry, Vector, VersionedShotCommand,
-    VersionedTableState,
+    Objective, Player,
 };
 use pwmtf_protocol::{
     ClientMessage, CommandEnvelope, CommandId, MatchStateMessage, ProtocolError, RejectReason,
@@ -99,11 +101,11 @@ struct PendingCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpponentCueTarget {
     /// Their latest aim this turn, if any has arrived.
-    pub aim: Option<pwmtf_game_domain::Aim>,
+    pub aim: Option<pwmtf_billiards::Aim>,
     /// Drawn-back power; zero when they are not charging.
-    pub power: pwmtf_game_domain::ShotPower,
+    pub power: pwmtf_billiards::ShotPower,
     /// Cue-ball contact point for the guide.
-    pub spin: pwmtf_game_domain::Spin,
+    pub spin: pwmtf_billiards::Spin,
 }
 
 #[derive(Debug, Default)]
@@ -147,7 +149,7 @@ impl ShotSummary {
     /// deterministic, so this reproduces the server's resolution exactly.
     fn replay(
         before: &MatchState,
-        command: pwmtf_game_domain::VersionedMatchCommand,
+        command: pwmtf_eight_ball::VersionedMatchCommand,
         revision: u64,
     ) -> Option<Self> {
         let mut after = before.clone();
@@ -190,10 +192,10 @@ struct MatchSession {
     last_shot: Option<ShotSummary>,
     /// An accepted shot to summarize once its playback has finished, so the
     /// replay never competes with rendering the shot.
-    unsummarized: Option<(MatchState, pwmtf_game_domain::VersionedMatchCommand, u64)>,
+    unsummarized: Option<(MatchState, pwmtf_eight_ball::VersionedMatchCommand, u64)>,
     /// Where every screen starts the cue this turn: the aim of the shot that
     /// led here, carried across placements and timeouts.
-    turn_aim: Option<(u64, pwmtf_game_domain::Aim)>,
+    turn_aim: Option<(u64, pwmtf_billiards::Aim)>,
     playback: Option<ShotPlayback>,
 }
 
@@ -1187,7 +1189,7 @@ impl SessionTransport {
     /// the aim of the shot that led here, or, without one (a fresh rack or a
     /// reconnect), from the cue ball toward the table's center.
     #[must_use]
-    pub fn turn_start_aim(&self) -> Option<pwmtf_game_domain::Aim> {
+    pub fn turn_start_aim(&self) -> Option<pwmtf_billiards::Aim> {
         let session = self.session.as_ref()?;
         let prediction = session.prediction.as_ref()?;
         let revision = prediction.authoritative_revision();
@@ -1199,14 +1201,14 @@ impl SessionTransport {
         let cue = prediction
             .authoritative()
             .table()
-            .ball(pwmtf_game_domain::BallId::CUE)?;
+            .ball(pwmtf_billiards::BallId::CUE)?;
         #[allow(clippy::cast_precision_loss)]
         let angle = (-(cue.position.y.micros() as f64)).atan2(-(cue.position.x.micros() as f64));
         let turns = angle.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let steps = (turns * f64::from(pwmtf_game_domain::Aim::STEPS_PER_TURN)).round() as u16
-            % pwmtf_game_domain::Aim::STEPS_PER_TURN;
-        pwmtf_game_domain::Aim::new(steps).ok()
+        let steps = (turns * f64::from(pwmtf_billiards::Aim::STEPS_PER_TURN)).round() as u16
+            % pwmtf_billiards::Aim::STEPS_PER_TURN;
+        pwmtf_billiards::Aim::new(steps).ok()
     }
 
     /// Asks the page to prompt for a pocket call after a blocked release.
@@ -1235,8 +1237,8 @@ impl SessionTransport {
             aim: resting
                 .map(|preview| preview.aim)
                 .or_else(|| self.turn_start_aim()),
-            power: pwmtf_game_domain::ShotPower::new(0).ok()?,
-            spin: resting.map_or(pwmtf_game_domain::Spin::CENTER, |preview| preview.spin),
+            power: pwmtf_billiards::ShotPower::new(0).ok()?,
+            spin: resting.map_or(pwmtf_billiards::Spin::CENTER, |preview| preview.spin),
         })
     }
 
@@ -1635,9 +1637,8 @@ pub enum TransportClientError {
 
 #[cfg(test)]
 mod tests {
-    use pwmtf_game_domain::{
-        Aim, BallId, MatchCommand, RackSeed, RulesProfile, ShotPower, Spin, VersionedMatchCommand,
-    };
+    use pwmtf_billiards::{Aim, BallId, RackSeed, ShotPower, Spin};
+    use pwmtf_eight_ball::{MatchCommand, RulesProfile, VersionedMatchCommand};
     use pwmtf_protocol::LastCommand;
 
     use super::*;
@@ -2193,7 +2194,7 @@ mod tests {
         assert_eq!(playback.limit(), ticks);
         assert_eq!(playback.table().balls(), {
             let started =
-                pwmtf_game_domain::start_shot(state.physics(), state.table().clone(), shot(8_000))
+                pwmtf_billiards::start_shot(state.physics(), state.table().clone(), shot(8_000))
                     .unwrap();
             started.balls().to_vec()
         });
@@ -2528,7 +2529,7 @@ mod tests {
         assert_eq!(idle.power.units(), 0);
         // A live preview drives it.
         let mut charged = preview(0, 1, false);
-        charged.power = pwmtf_game_domain::ShotPower::new(4_000).unwrap();
+        charged.power = pwmtf_billiards::ShotPower::new(4_000).unwrap();
         receive(&mut observer, charged, 110.0);
         let live = observer.opponent_cue_target(120.0).unwrap();
         assert_eq!(live.aim, Some(charged.aim));
