@@ -205,7 +205,7 @@ try {
   const practiceSession = practice.sessionId;
   const practiceCanvasRect = JSON.parse(await evaluate(practiceSession, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const practiceScale = Math.min(practiceCanvasRect.width / 1220, practiceCanvasRect.height / 590);
-  const practiceOrigin = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 - 295 * practiceScale,
+  const practiceOrigin = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 - 240 * practiceScale,
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await sleep(300);
   // Presentation preferences are device-local and restore before ready.
@@ -259,7 +259,7 @@ try {
   await until('a tap points the cue', async () => (await imageHash(practiceSession)) !== afterRotation);
   const afterTap = await stillAfter('a tap');
   // The AIM roller makes small turns.
-  const roller = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 + 500 * practiceScale,
+  const roller = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 - 567 * practiceScale,
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await mouse(practiceSession, 'mouseMoved', roller.x, roller.y, 0);
   await mouse(practiceSession, 'mousePressed', roller.x, roller.y, 1);
@@ -344,7 +344,7 @@ try {
   await until('focus shooter is player one', () => evaluate(focusShooter, 'document.querySelector("#match-status")?.textContent.includes("your turn")'), 20000);
   const focusCanvas = JSON.parse(await evaluate(focusShooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const focusScale = Math.min(focusCanvas.width / 1220, focusCanvas.height / 590);
-  const focusOrigin = {x: focusCanvas.x + focusCanvas.width / 2 - 295 * focusScale, y: focusCanvas.y + focusCanvas.height / 2};
+  const focusOrigin = {x: focusCanvas.x + focusCanvas.width / 2 - 240 * focusScale, y: focusCanvas.y + focusCanvas.height / 2};
   const focusBar = {x: focusCanvas.x + focusCanvas.width / 2 + 565 * focusScale,
     y: focusCanvas.y + focusCanvas.height / 2};
   const focusBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
@@ -460,7 +460,7 @@ try {
   });
   // The AIM roller makes a small, proportional turn.
   const rollerBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
-  const focusRoller = {x: focusCanvas.x + focusCanvas.width / 2 + 500 * focusScale,
+  const focusRoller = {x: focusCanvas.x + focusCanvas.width / 2 - 567 * focusScale,
     y: focusCanvas.y + focusCanvas.height / 2};
   await mouse(focusShooter, 'mouseMoved', focusRoller.x, focusRoller.y, 0);
   await mouse(focusShooter, 'mousePressed', focusRoller.x, focusRoller.y, 1);
@@ -520,7 +520,7 @@ try {
   await send('Target.activateTarget', {targetId: deadlineShooterPage.targetId});
   const deadlineCanvas = JSON.parse(await evaluate(deadlineShooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const deadlineScale = Math.min(deadlineCanvas.width / 1220, deadlineCanvas.height / 590);
-  const deadlineOrigin = {x: deadlineCanvas.x + deadlineCanvas.width / 2 - 295 * deadlineScale,
+  const deadlineOrigin = {x: deadlineCanvas.x + deadlineCanvas.width / 2 - 240 * deadlineScale,
     y: deadlineCanvas.y + deadlineCanvas.height / 2};
   const deadlineBar = {x: deadlineCanvas.x + deadlineCanvas.width / 2 + 565 * deadlineScale,
     y: deadlineCanvas.y + deadlineCanvas.height / 2};
@@ -572,7 +572,7 @@ try {
   await send('Target.activateTarget', {targetId: one.targetId});
   const canvas = JSON.parse(await evaluate(shooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const scale = Math.min(canvas.width / 1220, canvas.height / 590);
-  const origin = {x: canvas.x + canvas.width / 2 - 295 * scale, y: canvas.y + canvas.height / 2};
+  const origin = {x: canvas.x + canvas.width / 2 - 240 * scale, y: canvas.y + canvas.height / 2};
   const matchBar = {x: canvas.x + canvas.width / 2 + 565 * scale, y: canvas.y + canvas.height / 2};
   // Power-bar position for a given charge, in design units below its zero point.
   const charge = (units) => [matchBar.x, matchBar.y + units * scale];

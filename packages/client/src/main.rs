@@ -23,7 +23,9 @@ use bevy::{
 };
 
 const DESIGN_SIZE: Vec2 = Vec2::new(1220.0, 590.0);
-const TABLE_CENTER_X: f32 = -55.0;
+// Centered so POWER has room on the right and the AIM roller on the left,
+// keeping the two drag controls apart.
+const TABLE_CENTER_X: f32 = 0.0;
 const TABLE_SIZE: Vec2 = Vec2::new(960.0, 480.0);
 const CUSHION: f32 = 34.0;
 // Use the same geometry and scale as canonical_to_world; artwork must not
@@ -36,9 +38,20 @@ const BALL_RADIUS: f32 = {
 };
 const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_BAR_X: f32 = 565.0;
-/// Fine-tune roller beside the power bar, in design units.
-const FINE_AIM_X: f32 = 500.0;
+/// Fine-tune roller on the side opposite POWER, so pulling a shot never
+/// brushes it; in design units.
+const FINE_AIM_X: f32 = -567.0;
 const FINE_AIM_RIDGES: usize = 12;
+// The AIM roller and POWER bar touch zones (±26 and ±32) sit on opposite
+// sides of the table, clear of its cushions, and inside the design area.
+const _: () = {
+    let table_left = TABLE_CENTER_X - TABLE_SIZE.x / 2.0 - CUSHION;
+    let table_right = TABLE_CENTER_X + TABLE_SIZE.x / 2.0 + CUSHION;
+    assert!(FINE_AIM_X - 26.0 >= -DESIGN_SIZE.x / 2.0);
+    assert!(FINE_AIM_X + 26.0 < table_left);
+    assert!(POWER_BAR_X - 32.0 > table_right);
+    assert!(POWER_BAR_X + 32.0 <= DESIGN_SIZE.x / 2.0 + 1.0);
+};
 /// Aim turn per design unit dragged along the roller (about 0.034°).
 const FINE_AIM_RADIANS_PER_UNIT: f32 = 0.0006;
 /// Rotation is damped proportionally inside this distance from the cue ball,
