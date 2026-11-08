@@ -31,6 +31,9 @@
         <button id="open-settings" class="icon-button" type="button" aria-label="Menu and settings" aria-controls="settings-sheet" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
         </button>
+        <button id="spin-button" type="button" aria-label="Cue spin" aria-controls="spin-popover" aria-expanded="false">
+          <span class="spin-face"><i id="spin-button-dot"></i></span>
+        </button>
         <div id="match-hud" role="status" aria-live="polite">
           <span id="hud-players"></span>
           <span id="hud-turn"></span>
@@ -44,9 +47,6 @@
       <output id="match-status" aria-hidden="true"></output>
       <footer id="game-help">Touch a direction on the table to aim · Drag POWER down and release to shoot</footer>
 
-      <button id="spin-button" type="button" aria-label="Cue spin" aria-controls="spin-popover" aria-expanded="false">
-        <span class="spin-face"><i id="spin-button-dot"></i></span>
-      </button>
       <section id="spin-popover" aria-label="Cue spin" hidden>
         <div id="spin-pad" role="slider" tabindex="0" aria-label="Cue ball contact point" aria-valuetext="Center hit">
           <i id="spin-pad-dot"></i>

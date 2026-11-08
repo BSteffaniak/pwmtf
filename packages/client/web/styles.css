@@ -203,7 +203,7 @@ select:focus-visible,
   right: calc(var(--safe-right) + 8px);
   left: calc(var(--safe-left) + 8px);
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: center;
   gap: 8px;
   pointer-events: none;
@@ -218,7 +218,7 @@ select:focus-visible,
 }
 
 #match-hud {
-  grid-column: 2;
+  grid-column: 3;
   justify-self: center;
   display: flex;
   align-items: center;
@@ -270,7 +270,7 @@ select:focus-visible,
 }
 
 #open-play {
-  grid-column: 3;
+  grid-column: 4;
   position: relative;
   min-height: 40px;
   border-radius: 999px;
@@ -320,12 +320,9 @@ select:focus-visible,
 /* ---------- Spin ---------- */
 
 #spin-button {
-  position: absolute;
-  z-index: 4;
-  bottom: calc(var(--safe-bottom) + 28px);
-  left: calc(var(--safe-left) + 10px);
-  width: 48px;
-  height: 48px;
+  grid-column: 2;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border-color: var(--line);
   border-radius: 50%;
@@ -363,8 +360,8 @@ select:focus-visible,
 #spin-popover {
   position: absolute;
   z-index: 6;
-  bottom: calc(var(--safe-bottom) + 84px);
-  left: calc(var(--safe-left) + 10px);
+  top: calc(var(--safe-top) + 54px);
+  left: calc(var(--safe-left) + 60px);
   display: grid;
   justify-items: center;
   gap: 0.5rem;
@@ -1044,8 +1041,9 @@ input:user-invalid:not(:placeholder-shown) {
 /* ---------- Short landscape (phones) ---------- */
 
 @media (max-height: 500px) and (orientation: landscape) {
+  /* The HUD keeps its own lane so it never covers pockets or rails. */
   #table-stage {
-    inset: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+    inset: calc(var(--safe-top) + 48px) var(--safe-right) var(--safe-bottom) var(--safe-left);
   }
 
   #game-help {
@@ -1056,6 +1054,17 @@ input:user-invalid:not(:placeholder-shown) {
     top: calc(var(--safe-top) + 4px);
   }
 
+  #hud button,
+  #match-hud {
+    min-height: 40px;
+  }
+
+  #open-settings,
+  #spin-button {
+    width: 40px;
+    height: 40px;
+  }
+
   #open-play-label {
     font-size: 0.9rem;
   }
@@ -1064,12 +1073,8 @@ input:user-invalid:not(:placeholder-shown) {
     display: none;
   }
 
-  #spin-button {
-    bottom: calc(var(--safe-bottom) + 10px);
-  }
-
   #spin-popover {
-    bottom: calc(var(--safe-bottom) + 66px);
+    top: calc(var(--safe-top) + 50px);
   }
 
   .sheet {
