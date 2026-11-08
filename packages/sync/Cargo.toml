@@ -1,0 +1,18 @@
+[package]
+authors     = { workspace = true }
+categories  = ["game-development", "network-programming"]
+description = "Deterministic authoritative command-replay synchronization for turn-based physics games"
+edition     = { workspace = true }
+keywords    = ["deterministic", "game", "multiplayer", "netcode", "replay"]
+license     = { workspace = true }
+name        = "pwmtf_sync"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[dependencies]
+thiserror = { workspace = true }
+
+[features]
+default          = []
+fail-on-warnings = []

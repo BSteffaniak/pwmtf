@@ -5878,6 +5878,7 @@ dependencies = [
 name = "pwmtf_billiards"
 version = "0.1.0"
 dependencies = [
+ "pwmtf_sync",
  "thiserror 2.0.20",
 ]
 
@@ -5892,6 +5893,7 @@ dependencies = [
  "pwmtf_eight_ball",
  "pwmtf_protocol",
  "pwmtf_server",
+ "pwmtf_sync",
  "thiserror 2.0.20",
  "wasm-bindgen",
  "web-sys",
@@ -5902,6 +5904,7 @@ name = "pwmtf_eight_ball"
 version = "0.1.0"
 dependencies = [
  "pwmtf_billiards",
+ "pwmtf_sync",
  "thiserror 2.0.20",
 ]
 
@@ -5927,6 +5930,7 @@ dependencies = [
  "pwmtf_billiards",
  "pwmtf_eight_ball",
  "pwmtf_protocol",
+ "pwmtf_sync",
  "serde",
  "sha2 0.11.0",
  "switchy_database",
@@ -5937,6 +5941,13 @@ dependencies = [
  "tokio-tungstenite",
  "tower-http",
  "turso",
+]
+
+[[package]]
+name = "pwmtf_sync"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
 ]
 
 [[package]]

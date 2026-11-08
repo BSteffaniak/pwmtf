@@ -11,7 +11,6 @@ mod ball_art;
 mod cue_art;
 mod exact_preview;
 pub mod opponent_cue;
-pub mod playback;
 pub mod prediction;
 mod sandbox;
 pub mod transport;
@@ -825,7 +824,7 @@ impl CanonicalPresentation {
 impl CanonicalPresentation {
     /// Shows a running shot playback directly: positions are the playback's
     /// fixed-tick samples, and a ball disappears on the tick it is pocketed.
-    fn project_playback(&mut self, playback: &playback::ShotPlayback) {
+    fn project_playback(&mut self, playback: &pwmtf_billiards::playback::ShotPlayback) {
         self.checksum = None;
         self.target.clear();
         self.pocketed.clear();

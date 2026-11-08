@@ -5,7 +5,7 @@ use pwmtf_billiards::{
     VersionedTableState, standard_rack,
 };
 
-use crate::playback::{PlaybackEnd, ShotPlayback};
+use pwmtf_billiards::playback::{PlaybackEnd, ShotPlayback};
 
 #[derive(Resource)]
 pub struct Sandbox {

@@ -386,7 +386,6 @@ const fn reject_reason(error: CommandError) -> RejectReason {
         CommandError::IdempotencyConflict => RejectReason::IdempotencyConflict,
         CommandError::Unauthorized => RejectReason::NotSubscribed,
         CommandError::MatchNotFound
-        | CommandError::InvalidDeadlineState
         | CommandError::RevisionExhausted
         | CommandError::Journal(_) => RejectReason::Unavailable,
     }

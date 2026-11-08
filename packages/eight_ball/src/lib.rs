@@ -4,6 +4,8 @@
 //! Versioned authoritative 8-ball match transitions on `pwmtf_billiards`
 //! physics: groups, fouls, called 8, timeouts, concessions and rematches.
 
+mod sync;
+
 use pwmtf_billiards::{
     BallId, BallState, PhysicsProfile, PocketId, RackError, RackSeed, SimulationError,
     SimulationEventKind, TableGeometry, Vector, VersionedShotCommand, VersionedTableState,

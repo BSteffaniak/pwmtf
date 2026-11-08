@@ -4,7 +4,7 @@
 //! shot replays bit-exactly with the server. It only drives presentation and
 //! never decides gameplay.
 
-use pwmtf_billiards::{
+use crate::{
     BallId, PhysicsProfile, SimulationError, TableGeometry, VersionedShotCommand,
     VersionedTableState, advance_tick, start_shot,
 };
@@ -210,22 +210,46 @@ impl ShotPlayback {
     }
 }
 
+impl pwmtf_sync::Playback for ShotPlayback {
+    fn advance(&mut self, seconds: f64) -> bool {
+        Self::advance(self, seconds)
+    }
+
+    fn is_finished(&self) -> bool {
+        Self::is_finished(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use pwmtf_billiards::{Aim, RackSeed, ShotPower, Spin};
-    use pwmtf_eight_ball::{MatchCommand, MatchState, Player, RulesProfile, VersionedMatchCommand};
+    use crate::{Aim, RackSeed, ShotPower, Spin, simulate_shot, standard_rack};
 
     use super::*;
 
-    fn state() -> MatchState {
-        MatchState::new(
-            RulesProfile::standard(),
-            PhysicsProfile::standard(),
-            TableGeometry::standard(),
-            RackSeed::new(42),
-            Player::One,
-        )
-        .unwrap()
+    /// A freshly racked table with the canonical profile and geometry.
+    struct Racked {
+        table: VersionedTableState,
+    }
+
+    #[allow(clippy::unused_self)]
+    impl Racked {
+        const fn physics(&self) -> PhysicsProfile {
+            PhysicsProfile::standard()
+        }
+
+        const fn geometry(&self) -> TableGeometry {
+            TableGeometry::standard()
+        }
+
+        const fn table(&self) -> &VersionedTableState {
+            &self.table
+        }
+    }
+
+    fn state() -> Racked {
+        Racked {
+            table: standard_rack(TableGeometry::standard(), RackSeed::new(42)).unwrap(),
+        }
     }
 
     fn shot(power: u16) -> VersionedShotCommand {
@@ -239,31 +263,33 @@ mod tests {
     #[test]
     fn playback_converges_with_authoritative_shot_at_the_reported_tick() {
         let initial = state();
-        let mut authority = initial.clone();
-        let applied = authority
-            .apply_command_timed(VersionedMatchCommand::new(MatchCommand::PlayShot {
-                shot: shot(8_000),
-                called_pocket: None,
-            }))
-            .unwrap();
-        assert!(applied.playback_ticks > 0);
+        let authority = simulate_shot(
+            initial.geometry(),
+            initial.physics(),
+            initial.table().clone(),
+            shot(8_000),
+        )
+        .unwrap()
+        .state;
+        let playback_ticks = authority.tick - initial.table().tick;
+        assert!(playback_ticks > 0);
         let mut playback = ShotPlayback::start(
             initial.physics(),
             initial.geometry(),
             initial.table().clone(),
             shot(8_000),
-            Some(applied.playback_ticks),
+            Some(playback_ticks),
         )
         .unwrap();
         let mut moved_mid_shot = false;
         while !playback.advance_tick() {
             moved_mid_shot |= playback.table().balls() != initial.table().balls()
-                && playback.table().balls() != authority.table().balls();
+                && playback.table().balls() != authority.balls();
         }
         assert!(moved_mid_shot);
-        assert_eq!(playback.ticks(), applied.playback_ticks);
+        assert_eq!(playback.ticks(), playback_ticks);
         assert_eq!(playback.end(), Some(PlaybackEnd::Settled));
-        assert_eq!(playback.table().balls(), authority.table().balls());
+        assert_eq!(playback.table().balls(), authority.balls());
     }
 
     #[test]

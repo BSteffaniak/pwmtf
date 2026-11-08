@@ -5,6 +5,7 @@ members = [
     "packages/eight_ball",
     "packages/protocol",
     "packages/server",
+    "packages/sync",
 ]
 resolver = "3"
 

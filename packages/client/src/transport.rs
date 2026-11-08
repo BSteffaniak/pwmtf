@@ -20,13 +20,14 @@ use pwmtf_protocol::{
 };
 use thiserror::Error;
 
-use crate::playback::ShotPlayback;
-use crate::prediction::{PredictionError, PredictionState};
+use crate::prediction::{MatchReplica, PredictionError, decode_snapshot, envelope, key};
+use pwmtf_billiards::playback::ShotPlayback;
+use pwmtf_sync::Remote;
 
 /// First reconnect delay after a failure.
 pub const RETRY_BASE_MS: f64 = 250.0;
 /// Longest stretch of a shot played back in one frame.
-pub const MAX_PLAYBACK_FRAME_MS: f64 = 50.0;
+pub use pwmtf_sync::MAX_PLAYBACK_STEP_MS as MAX_PLAYBACK_FRAME_MS;
 /// Upper bound on the exponential reconnect delay.
 pub const RETRY_MAX_MS: f64 = 30_000.0;
 /// Interval between client pings while ready.
@@ -87,14 +88,6 @@ pub struct ClockSync {
     pub offset_ms: f64,
     /// Half the round trip of the sample, bounding the offset error.
     pub uncertainty_ms: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PendingCommand {
-    envelope: CommandEnvelope,
-    /// Set after a socket loss; the command is resent with the same id once
-    /// the post-reconnect state proves it was not applied.
-    resend_on_state: bool,
 }
 
 /// Where the opponent's cue should be while they plan a shot.
@@ -184,33 +177,24 @@ impl ShotSummary {
 struct MatchSession {
     match_id: u128,
     seat: Option<Player>,
-    prediction: Option<PredictionState>,
+    /// Authoritative state, the pending command and shot playback.
+    replica: Option<MatchReplica>,
     deadline_at_ms: Option<u64>,
-    pending: Option<PendingCommand>,
     /// The local player's 8-ball call, valid only for the revision it was made at.
     called_pocket: Option<(u64, PocketId)>,
     last_shot: Option<ShotSummary>,
-    /// An accepted shot to summarize once its playback has finished, so the
-    /// replay never competes with rendering the shot.
-    unsummarized: Option<(MatchState, pwmtf_eight_ball::VersionedMatchCommand, u64)>,
     /// Where every screen starts the cue this turn: the aim of the shot that
     /// led here, carried across placements and timeouts.
     turn_aim: Option<(u64, pwmtf_billiards::Aim)>,
-    playback: Option<ShotPlayback>,
 }
 
 impl MatchSession {
-    /// Work deferred while a shot played back: the summary of an accepted
-    /// shot, and the local outcome of our own shot if the server has not
-    /// answered yet. Run only when the table is still.
+    /// Summarizes the latest accepted shot once its playback has finished,
+    /// so the replay never competes with rendering the shot.
     fn summarize_settled_shot(&mut self) {
-        if let Some((before, command, revision)) = self.unsummarized.take() {
-            self.last_shot = ShotSummary::replay(&before, command, revision);
-        }
-        if self.pending.is_some()
-            && let Some(prediction) = self.prediction.as_mut()
-        {
-            prediction.settle_deferred();
+        if let Some(settled) = self.replica.as_mut().and_then(MatchReplica::take_settled) {
+            self.last_shot =
+                ShotSummary::replay(&settled.before, settled.command, settled.revision);
         }
     }
 
@@ -218,14 +202,11 @@ impl MatchSession {
         Self {
             match_id,
             seat: None,
-            prediction: None,
+            replica: None,
             deadline_at_ms: None,
-            pending: None,
             called_pocket: None,
             last_shot: None,
-            unsummarized: None,
             turn_aim: None,
-            playback: None,
         }
     }
 }
@@ -250,8 +231,6 @@ pub struct SessionTransport {
     lobby_id: Option<u128>,
     previews: PreviewState,
     presentation_epoch: u64,
-    playback_clock: Option<f64>,
-    playback_finished: bool,
     actions: Vec<TransportAction>,
     events: Vec<TransportEvent>,
     last_connection_event: Option<&'static str>,
@@ -278,8 +257,6 @@ impl Default for SessionTransport {
             lobby_id: None,
             previews: PreviewState::default(),
             presentation_epoch: 0,
-            playback_clock: None,
-            playback_finished: false,
             actions: Vec::new(),
             events: Vec::new(),
             last_connection_event: None,
@@ -439,8 +416,8 @@ impl SessionTransport {
             interrupted_gesture: self.previews.interrupted_gesture,
             ..PreviewState::default()
         };
-        if let Some(pending) = self.session.as_mut().and_then(|s| s.pending.as_mut()) {
-            pending.resend_on_state = true;
+        if let Some(replica) = self.session.as_mut().and_then(|s| s.replica.as_mut()) {
+            replica.request_resend();
         }
     }
 
@@ -574,8 +551,6 @@ impl SessionTransport {
         self.emit_match();
     }
 
-    // One cohesive transition: reconcile, playback, pending command and summary.
-    #[allow(clippy::too_many_lines)]
     fn receive_match_state(&mut self, message: MatchStateMessage) -> Result<(), PredictionError> {
         let Some(session) = self
             .session
@@ -584,129 +559,53 @@ impl SessionTransport {
         else {
             return Ok(());
         };
-        let envelope = SnapshotEnvelope::new(message.revision, message.checksum, message.snapshot)?;
+        let envelope_in =
+            SnapshotEnvelope::new(message.revision, message.checksum, message.snapshot)?;
+        let state = decode_snapshot(&envelope_in)?;
         session.seat = Some(message.seat);
         session.deadline_at_ms = message.deadline_at_ms;
-        let Some(prediction) = session.prediction.as_mut() else {
-            session.prediction = Some(PredictionState::from_snapshot(&envelope)?);
+        let Some(replica) = session.replica.as_mut() else {
+            session.replica = Some(MatchReplica::new(message.revision, state));
             self.previews.clear_remote();
             self.emit_match();
             return Ok(());
         };
-        let local = prediction.authoritative_revision();
-        let mut superseded = false;
-        let mut revision_changed = false;
-        match message.revision.cmp(&local) {
-            // Delayed state from before a later broadcast; authority already moved on.
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => {
-                match prediction.reconcile(&envelope) {
-                    Ok(_) => {}
-                    Err(PredictionError::RevisionConflict) => {
-                        *prediction = PredictionState::from_snapshot(&envelope)?;
-                        superseded = session.pending.take().is_some();
-                        session.playback = None;
-                        self.playback_finished = true;
-                        revision_changed = true;
-                    }
-                    Err(error) => return Err(error),
-                }
-                if let Some(pending) = session.pending.as_mut()
-                    && pending.resend_on_state
-                    && pending.envelope.expected_revision == message.revision
-                {
-                    pending.resend_on_state = false;
-                    let resend = ClientMessage::Command {
-                        match_id: session.match_id,
-                        envelope: pending.envelope,
-                    };
-                    if let Ok(frame) = resend.to_bytes() {
-                        self.actions.push(TransportAction::Send(frame));
-                    }
-                }
-            }
-            std::cmp::Ordering::Greater => {
-                revision_changed = true;
-                session.turn_aim = match message.last_command.map(|last| last.command.command) {
-                    Some(MatchCommand::PlayShot { shot, .. }) => Some((message.revision, shot.aim)),
-                    // The cue does not move during a placement or timeout.
-                    Some(_) if message.revision == local + 1 => session
-                        .turn_aim
-                        .filter(|(at, _)| *at == local)
-                        .map(|(_, aim)| (message.revision, aim)),
-                    _ => None,
-                };
-                session.unsummarized = message
-                    .last_command
-                    .filter(|_| message.revision == local + 1)
-                    .map(|last| {
-                        (
-                            prediction.authoritative().clone(),
-                            last.command,
-                            message.revision,
-                        )
-                    });
-                // Without a command id, recognizing our own shot needs its
-                // resolved outcome; this reconnect path is rare.
-                if message.last_command.is_none() && session.pending.is_some() {
-                    prediction.settle_deferred();
-                }
-                let ours = session.pending.is_some_and(|pending| {
-                    message.last_command.map_or_else(
-                        || {
-                            message.revision == pending.envelope.expected_revision + 1
-                                && prediction.predicted().checksum() == message.checksum
-                        },
-                        |last| last.command_id == pending.envelope.command_id,
-                    )
-                });
-                if session.pending.is_some() && !ours {
-                    prediction.abandon_prediction();
-                    session.pending = None;
-                    session.playback = None;
-                    self.playback_finished = true;
-                    superseded = true;
-                }
-                if ours {
-                    // The shooter's release-time playback describes exactly
-                    // this transition, so it keeps running.
-                    session.pending = None;
-                } else if message.revision == local + 1
-                    && let Some(last) = message.last_command
-                    && last.playback_ticks > 0
-                    && let MatchCommand::PlayShot { shot, .. } = last.command.command
-                {
-                    let authority = prediction.authoritative();
-                    session.playback = ShotPlayback::start(
-                        authority.physics(),
-                        authority.geometry(),
-                        authority.table().clone(),
-                        shot,
-                        Some(last.playback_ticks),
-                    )
-                    .ok()
-                    .filter(|playback| !playback.is_finished());
-                    self.playback_clock = None;
-                    if session.playback.is_none() {
-                        self.playback_finished = true;
-                    }
-                } else if session.playback.take().is_some() {
-                    // Gap, reconnect, placement or timeout: an older replay
-                    // must not keep drawing over newer authoritative state.
-                    self.playback_finished = true;
-                }
-                prediction.reconcile(&envelope)?;
+        let local = replica.revision();
+        if message.revision > local {
+            session.turn_aim = match message.last_command.map(|last| last.command.command) {
+                Some(MatchCommand::PlayShot { shot, .. }) => Some((message.revision, shot.aim)),
+                // The cue does not move during a placement or timeout.
+                Some(_) if message.revision == local + 1 => session
+                    .turn_aim
+                    .filter(|(at, _)| *at == local)
+                    .map(|(_, aim)| (message.revision, aim)),
+                _ => None,
+            };
+        }
+        let received = replica.receive(
+            message.revision,
+            state,
+            message.last_command.map(|last| Remote {
+                key: key(last.command_id),
+                seat: last.actor,
+                command: last.command,
+                playback_ticks: last.playback_ticks,
+            }),
+        );
+        if let Some(pending) = received.resend {
+            let resend = ClientMessage::Command {
+                match_id: session.match_id,
+                envelope: envelope(&pending),
+            };
+            if let Ok(frame) = resend.to_bytes() {
+                self.actions.push(TransportAction::Send(frame));
             }
         }
-        if revision_changed {
+        session.summarize_settled_shot();
+        if received.revision_changed {
             self.previews.clear_remote();
         }
-        if let Some(session) = self.session.as_mut()
-            && session.playback.is_none()
-        {
-            session.summarize_settled_shot();
-        }
-        if superseded {
+        if received.superseded {
             self.emit_rejection(message.match_id, "superseded");
         }
         self.emit_match();
@@ -721,17 +620,12 @@ impl SessionTransport {
         else {
             return;
         };
-        if session
-            .pending
-            .is_some_and(|pending| pending.envelope.command_id == command_id)
+        if let Some(replica) = session.replica.as_mut()
+            && replica
+                .pending()
+                .is_some_and(|pending| pending.key == key(command_id))
         {
-            session.pending = None;
-            if let Some(prediction) = session.prediction.as_mut() {
-                prediction.abandon_prediction();
-            }
-            if session.playback.take().is_some() {
-                self.playback_finished = true;
-            }
+            replica.abandon();
         }
         self.emit_rejection(match_id, reject_reason_label(reason));
         self.emit_match();
@@ -779,11 +673,11 @@ impl SessionTransport {
             return false;
         };
         self.status == ConnectionStatus::Ready
-            && session.pending.is_none()
-            && session.playback.is_none()
-            && session.prediction.as_ref().is_some_and(|prediction| {
-                let state = prediction.authoritative();
-                prediction.authoritative_revision() == preview.revision
+            && session.replica.as_ref().is_some_and(|replica| {
+                let state = replica.authoritative();
+                replica.pending().is_none()
+                    && replica.playback().is_none()
+                    && replica.revision() == preview.revision
                     && matches!(state.status(), MatchStatus::InProgress)
                     && session
                         .seat
@@ -820,7 +714,6 @@ impl SessionTransport {
         }
         self.previews = PreviewState::default();
         self.last_match_event = None;
-        self.playback_clock = None;
         self.presentation_epoch = self.presentation_epoch.wrapping_add(1);
     }
 
@@ -863,31 +756,18 @@ impl SessionTransport {
         called_pocket: Option<PocketId>,
     ) -> Result<(), TransportClientError> {
         self.require_active_player()?;
-        let session = self
-            .session
-            .as_mut()
-            .ok_or(TransportClientError::NotReady)?;
-        let prediction = session
-            .prediction
-            .as_mut()
-            .ok_or(TransportClientError::NotReady)?;
-        let authority = prediction.authoritative();
-        let (physics, geometry, table) = (
-            authority.physics(),
-            authority.geometry(),
-            authority.table().clone(),
-        );
-        let envelope = prediction.predict_shot(command_id, shot, called_pocket)?;
-        // Plays until the balls settle, which canonical physics makes
-        // identical to the server's tick count.
-        session.playback = ShotPlayback::start(physics, geometry, table, shot, None)
-            .ok()
-            .filter(|playback| !playback.is_finished());
-        self.playback_clock = None;
+        // The shot plays back at once from the authoritative table, until the
+        // balls settle; canonical physics makes that the server's tick count.
+        self.submit_command(
+            command_id,
+            pwmtf_eight_ball::VersionedMatchCommand::new(MatchCommand::PlayShot {
+                shot,
+                called_pocket,
+            }),
+        )?;
         self.previews.pending_cancel = None;
         self.previews.active = None;
         self.previews.last_sent = None;
-        self.dispatch(envelope);
         Ok(())
     }
 
@@ -902,12 +782,10 @@ impl SessionTransport {
         position: Vector,
     ) -> Result<(), TransportClientError> {
         self.require_active_player()?;
-        let envelope = self
-            .prediction_mut()
-            .ok_or(TransportClientError::NotReady)?
-            .predict_cue_ball_placement(command_id, position)?;
-        self.dispatch(envelope);
-        Ok(())
+        self.submit_command(
+            command_id,
+            pwmtf_eight_ball::VersionedMatchCommand::new(MatchCommand::PlaceCueBall { position }),
+        )
     }
 
     /// Predicts and sends one explicit concession.
@@ -929,12 +807,10 @@ impl SessionTransport {
         if self.seat() != Some(player) {
             return Err(TransportClientError::WrongTurn);
         }
-        let envelope = self
-            .prediction_mut()
-            .ok_or(TransportClientError::NotReady)?
-            .predict_concession(command_id, player)?;
-        self.dispatch(envelope);
-        Ok(())
+        self.submit_command(
+            command_id,
+            pwmtf_eight_ball::VersionedMatchCommand::new(MatchCommand::Concede { player }),
+        )
     }
 
     fn require_active_player(&self) -> Result<(), TransportClientError> {
@@ -947,27 +823,35 @@ impl SessionTransport {
         Ok(())
     }
 
-    fn dispatch(&mut self, envelope: CommandEnvelope) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        session.pending = Some(PendingCommand {
-            envelope,
-            resend_on_state: false,
-        });
+    /// Predicts `command` locally and sends it against the authoritative
+    /// revision.
+    fn submit_command(
+        &mut self,
+        command_id: CommandId,
+        command: pwmtf_eight_ball::VersionedMatchCommand,
+    ) -> Result<(), TransportClientError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(TransportClientError::NotReady)?;
+        let replica = session
+            .replica
+            .as_mut()
+            .ok_or(TransportClientError::NotReady)?;
+        let revision = replica
+            .submit(key(command_id), command)
+            .map_err(PredictionError::from)?;
         let match_id = session.match_id;
+        let envelope = CommandEnvelope::new(revision, command_id, command);
         if !self.send(&ClientMessage::Command { match_id, envelope }) {
             // Unencodable frames cannot occur for validated envelopes; resend
             // after the next authoritative state rather than losing the command.
-            if let Some(pending) = self.session.as_mut().and_then(|s| s.pending.as_mut()) {
-                pending.resend_on_state = true;
+            if let Some(replica) = self.session.as_mut().and_then(|s| s.replica.as_mut()) {
+                replica.request_resend();
             }
         }
         self.emit_match();
-    }
-
-    fn prediction_mut(&mut self) -> Option<&mut PredictionState> {
-        self.session.as_mut()?.prediction.as_mut()
+        Ok(())
     }
 
     // ----- playback --------------------------------------------------------
@@ -977,28 +861,26 @@ impl SessionTransport {
     /// Returns `true` exactly once when a playback finishes or is cut short,
     /// so presentation snaps to the authoritative state.
     pub fn advance_playback(&mut self, now: f64) -> bool {
+        let Some(session) = self.session.as_mut() else {
+            return false;
+        };
+        let Some(replica) = session.replica.as_mut() else {
+            return false;
+        };
         // A slow frame delays the shot slightly instead of skipping ahead,
         // so the strike and first collisions are always seen.
-        let elapsed = self.playback_clock.map_or(0.0, |previous| {
-            (now - previous).clamp(0.0, MAX_PLAYBACK_FRAME_MS)
-        });
-        self.playback_clock = Some(now);
-        if let Some(session) = self.session.as_mut()
-            && let Some(playback) = session.playback.as_mut()
-            && playback.advance(elapsed / 1_000.0)
-        {
-            session.playback = None;
+        let ended = replica.advance(now);
+        if ended {
             session.summarize_settled_shot();
-            self.playback_finished = true;
             self.emit_match();
         }
-        std::mem::take(&mut self.playback_finished)
+        ended
     }
 
     /// Returns the running shot playback, if any.
     #[must_use]
     pub fn playback(&self) -> Option<&ShotPlayback> {
-        self.session.as_ref()?.playback.as_ref()
+        self.session.as_ref()?.replica.as_ref()?.playback()
     }
 
     /// Returns whether a shot is currently playing back.
@@ -1148,9 +1030,9 @@ impl SessionTransport {
             && self.session.as_ref().is_some_and(|session| {
                 session
                     .seat
-                    .zip(session.prediction.as_ref())
-                    .is_some_and(|(seat, prediction)| {
-                        prediction.authoritative().objective(seat) == Objective::EightBall
+                    .zip(session.replica.as_ref())
+                    .is_some_and(|(seat, replica)| {
+                        replica.authoritative().objective(seat) == Objective::EightBall
                     })
             })
     }
@@ -1163,11 +1045,7 @@ impl SessionTransport {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let Some(revision) = session
-            .prediction
-            .as_ref()
-            .map(PredictionState::authoritative_revision)
-        else {
+        let Some(revision) = session.replica.as_ref().map(MatchReplica::revision) else {
             return;
         };
         session.called_pocket = Some((revision, pocket));
@@ -1178,7 +1056,7 @@ impl SessionTransport {
     #[must_use]
     pub fn called_pocket(&self) -> Option<PocketId> {
         let session = self.session.as_ref()?;
-        let revision = session.prediction.as_ref()?.authoritative_revision();
+        let revision = session.replica.as_ref()?.revision();
         session
             .called_pocket
             .filter(|(called_at, _)| *called_at == revision)
@@ -1191,8 +1069,8 @@ impl SessionTransport {
     #[must_use]
     pub fn turn_start_aim(&self) -> Option<pwmtf_billiards::Aim> {
         let session = self.session.as_ref()?;
-        let prediction = session.prediction.as_ref()?;
-        let revision = prediction.authoritative_revision();
+        let prediction = session.replica.as_ref()?;
+        let revision = prediction.revision();
         if let Some((at, aim)) = session.turn_aim
             && at == revision
         {
@@ -1246,19 +1124,19 @@ impl SessionTransport {
     /// is connected, idle, and not replaying a shot.
     fn opponent_turn_revision(&self) -> Option<u64> {
         let session = self.session.as_ref()?;
-        if self.status != ConnectionStatus::Ready
-            || session.pending.is_some()
-            || session.playback.is_some()
-        {
+        if self.status != ConnectionStatus::Ready {
             return None;
         }
-        let prediction = session.prediction.as_ref()?;
+        let prediction = session.replica.as_ref()?;
+        if prediction.pending().is_some() || prediction.playback().is_some() {
+            return None;
+        }
         let state = prediction.authoritative();
         (matches!(state.status(), MatchStatus::InProgress)
             && session
                 .seat
                 .is_some_and(|seat| seat != state.active_player()))
-        .then(|| prediction.authoritative_revision())
+        .then(|| prediction.revision())
     }
 
     // ----- queries ---------------------------------------------------------
@@ -1289,21 +1167,20 @@ impl SessionTransport {
 
     /// Returns prediction state after the first authoritative `MatchState`.
     #[must_use]
-    pub fn prediction(&self) -> Option<&PredictionState> {
-        self.session.as_ref()?.prediction.as_ref()
+    pub fn prediction(&self) -> Option<&MatchReplica> {
+        self.session.as_ref()?.replica.as_ref()
     }
 
     /// Returns the latest authoritative canonical match state.
     #[must_use]
     pub fn authoritative_state(&self) -> Option<&MatchState> {
-        self.prediction().map(PredictionState::authoritative)
+        self.prediction().map(MatchReplica::authoritative)
     }
 
     /// Returns the latest authoritative revision.
     #[must_use]
     pub fn authoritative_revision(&self) -> Option<u64> {
-        self.prediction()
-            .map(PredictionState::authoritative_revision)
+        self.prediction().map(MatchReplica::revision)
     }
 
     /// Returns the predicted state's checksum.
@@ -1316,18 +1193,16 @@ impl SessionTransport {
     /// Returns whether one command awaits authority.
     #[must_use]
     pub fn has_pending_command(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|session| session.pending.is_some())
+        self.prediction()
+            .is_some_and(|replica| replica.pending().is_some())
     }
 
     /// Returns the pending command's identifier.
     #[must_use]
     pub fn pending_command_id(&self) -> Option<CommandId> {
-        self.session
-            .as_ref()?
-            .pending
-            .map(|pending| pending.envelope.command_id)
+        self.prediction()?
+            .pending()
+            .map(|pending| CommandId::new(pending.key.0))
     }
 
     /// Returns the authoritative turn deadline in server Unix milliseconds.
@@ -1457,7 +1332,7 @@ impl SessionTransport {
     fn match_detail(&self) -> Option<String> {
         let session = self.session.as_ref()?;
         let seat = session.seat?;
-        let prediction = session.prediction.as_ref()?;
+        let prediction = session.replica.as_ref()?;
         let state = prediction.authoritative();
         let (active_player, winner, reason) = match state.status() {
             MatchStatus::InProgress => (player_number(state.active_player()), 0, ""),
@@ -1511,14 +1386,14 @@ impl SessionTransport {
              \"my_target\":\"{}\",\"opponent_target\":\"{}\",\"on_break\":{},\
              \"pocketed\":[{}],\"calling_eight\":{},\"called_pocket\":{},\"last_shot\":{}}}",
             session.match_id,
-            prediction.authoritative_revision(),
+            prediction.revision(),
             player_number(seat),
             active_player,
             winner,
             reason,
             state.ball_in_hand(),
-            session.pending.is_some(),
-            session.playback.is_some(),
+            prediction.pending().is_some(),
+            prediction.playback().is_some(),
             deadline,
             offset,
             uncertainty,
@@ -2023,7 +1898,7 @@ mod tests {
         let (next, ticks) = accepted_shot(&state, 8_000);
         // Release does no up-front simulation; playback runs until the balls
         // settle, which matches the server's tick count.
-        assert!(transport.prediction().unwrap().has_deferred());
+        assert!(transport.prediction().unwrap().has_unresolved());
         transport.receive(
             &state_frame(
                 &next,
@@ -2056,7 +1931,7 @@ mod tests {
         }
         assert!(finished);
         assert!(!transport.is_playing());
-        assert!(!transport.prediction().unwrap().has_deferred());
+        assert!(!transport.prediction().unwrap().has_unresolved());
     }
 
     #[test]

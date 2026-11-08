@@ -32,6 +32,7 @@ DECLARED_DIRECTORIES = (
     "packages/client",
     "packages/eight_ball",
     "packages/protocol",
+    "packages/sync",
 )
 
 

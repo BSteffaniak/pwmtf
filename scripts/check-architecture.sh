@@ -58,6 +58,8 @@ for domain in packages/billiards packages/eight_ball; do
     check_pattern "game-domain infrastructure dependency" '(^|[^[:alnum:]_])(bevy|lightyear|switchy[_-][[:alnum:]_]*|actix[-_][[:alnum:]_]*|axum|database|http|websocket|tokio)([^[:alnum:]_]|$)' "$domain"
     check_pattern "game-domain client authority vocabulary" '(ClientAuthoritative|client_authoritative|ReportedBallState|reported_ball_state)' "$domain"
 done
+# Synchronization stays sans-IO so any host (PWMTF, Cozy Lounge) can embed it.
+check_pattern "sync infrastructure dependency" '(^|[^[:alnum:]_])(bevy|lightyear|switchy[_-][[:alnum:]_]*|actix[-_][[:alnum:]_]*|axum|database|http|websocket|tokio|pwmtf_billiards|pwmtf_eight_ball)([^[:alnum:]_]|$)' packages/sync
 check_pattern "timeout forfeiture behavior" '(timeout|Timeout).*(forfeit|Forfeit|automatic_loss|AutomaticLoss)' packages
 check_pattern "unversioned canonical payload marker" 'Canonical(Payload|Snapshot|Command)[[:space:]]*\{' packages
 check_pattern "plaintext secret persistence field" '(session_token|invitation_token)[[:space:]]*:' packages/server

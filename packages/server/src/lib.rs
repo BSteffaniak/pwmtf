@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, future::Future};
 
 use pwmtf_eight_ball::{MatchCommandResult, MatchState, Player};
 use pwmtf_protocol::{CommandEnvelope, CommandId, SnapshotEnvelope};
+use pwmtf_sync::{Accepted, Authority, CommandKey, Deadline, Refusal, Submission};
 use thiserror::Error;
 
 mod command_store;
@@ -331,9 +332,6 @@ pub enum CommandError {
         /// Current canonical revision.
         actual: u64,
     },
-    /// Loaded terminal match retains an impossible authoritative deadline.
-    #[error("terminal match retains an authoritative deadline")]
-    InvalidDeadlineState,
     /// Match is already terminal and cannot accept another command.
     #[error("match is already completed")]
     MatchCompleted,
@@ -388,20 +386,54 @@ pub enum RecoveryError {
 
 struct MatchRuntime {
     participants: Participants,
-    revision: u64,
-    state: MatchState,
-    deadline: Option<ScheduledDeadline>,
-    accepted: BTreeMap<CommandId, StoredAcknowledgement>,
+    authority: Authority<MatchState>,
 }
 
-#[derive(Clone)]
-struct StoredAcknowledgement {
-    actor: AccountId,
-    frame: Vec<u8>,
-    acknowledgement: CommandAcknowledgement,
+impl MatchRuntime {
+    fn deadline(&self) -> Option<ScheduledDeadline> {
+        self.authority.deadline().map(scheduled)
+    }
+}
+
+/// Converts a synchronization deadline into the server's durable record.
+const fn scheduled(deadline: Deadline<Player>) -> ScheduledDeadline {
+    ScheduledDeadline {
+        id: DeadlineId {
+            revision: deadline.revision,
+            player: deadline.seat,
+        },
+        due_at: DeadlineMillis::new(deadline.due_at_ms),
+    }
+}
+
+const fn deadline_of(scheduled: ScheduledDeadline) -> Deadline<Player> {
+    Deadline {
+        revision: scheduled.id.revision,
+        seat: scheduled.id.player,
+        due_at_ms: scheduled.due_at.value(),
+    }
+}
+
+const fn command_key(command_id: CommandId) -> CommandKey {
+    CommandKey(command_id.bytes())
+}
+
+fn acknowledgement(accepted: &Accepted<MatchState>, duplicate: bool) -> CommandAcknowledgement {
+    CommandAcknowledgement {
+        revision: accepted.revision,
+        checksum: accepted.checksum,
+        result: accepted.outcome.clone(),
+        duplicate,
+        deadline: accepted.deadline.map(scheduled),
+        playback_ticks: accepted.playback_ticks,
+    }
 }
 
 /// In-process authoritative match service with injected durability.
+///
+/// Command acceptance, idempotency and deadlines come from
+/// [`pwmtf_sync::Authority`]; this service adds identity, the durable journal
+/// and recovery.
 pub struct MatchService<J> {
     journal: J,
     matches: BTreeMap<MatchId, MatchRuntime>,
@@ -434,13 +466,11 @@ impl<J: CommandJournal> MatchService<J> {
                 match_id,
                 MatchRuntime {
                     participants,
-                    revision: 0,
-                    state,
-                    deadline: None,
-                    accepted: BTreeMap::new(),
+                    authority: Authority::restore(state, 0, None, [])
+                        .expect("a match without a deadline always restores"),
                 },
             )
-            .map(|runtime| runtime.state)
+            .map(|runtime| runtime.authority.state().clone())
     }
 
     fn load_initial_match(
@@ -453,19 +483,13 @@ impl<J: CommandJournal> MatchService<J> {
         if self.matches.contains_key(&match_id) {
             return Err(RecoveryError::AlreadyLoaded);
         }
-        if let Some(deadline) = deadline
-            && (deadline.id.revision != 0 || deadline.id.player != state.active_player())
-        {
-            return Err(RecoveryError::InvalidDeadline);
-        }
+        let authority = Authority::restore(state, 0, deadline.map(deadline_of), [])
+            .map_err(|_| RecoveryError::InvalidDeadline)?;
         self.matches.insert(
             match_id,
             MatchRuntime {
                 participants,
-                revision: 0,
-                state,
-                deadline,
-                accepted: BTreeMap::new(),
+                authority,
             },
         );
         Ok(())
@@ -492,9 +516,9 @@ impl<J: CommandJournal> MatchService<J> {
                 (
                     *match_id,
                     runtime.participants,
-                    runtime.revision,
-                    runtime.state.clone(),
-                    runtime.deadline,
+                    runtime.authority.revision(),
+                    runtime.authority.state().clone(),
+                    runtime.deadline(),
                 )
             })
             .collect()
@@ -513,7 +537,7 @@ impl<J: CommandJournal> MatchService<J> {
     pub fn match_state(&self, match_id: MatchId) -> Option<(u64, &MatchState)> {
         self.matches
             .get(&match_id)
-            .map(|runtime| (runtime.revision, &runtime.state))
+            .map(|runtime| (runtime.authority.revision(), runtime.authority.state()))
     }
 
     /// Returns a complete canonical snapshot for initial subscription or reconnect.
@@ -527,10 +551,11 @@ impl<J: CommandJournal> MatchService<J> {
             .matches
             .get(&match_id)
             .ok_or(SnapshotError::MatchNotFound)?;
+        let state = runtime.authority.state();
         SnapshotEnvelope::new(
-            runtime.revision,
-            runtime.state.checksum(),
-            runtime.state.to_bytes(),
+            runtime.authority.revision(),
+            state.checksum(),
+            state.to_bytes(),
         )
         .map_err(|_| SnapshotError::TooLarge)
     }
@@ -538,9 +563,7 @@ impl<J: CommandJournal> MatchService<J> {
     /// Returns the current authoritative deadline.
     #[must_use]
     pub fn deadline(&self, match_id: MatchId) -> Option<ScheduledDeadline> {
-        self.matches
-            .get(&match_id)
-            .and_then(|runtime| runtime.deadline)
+        self.matches.get(&match_id).and_then(MatchRuntime::deadline)
     }
 
     /// Returns current deadlines in stable match-identifier order.
@@ -549,7 +572,7 @@ impl<J: CommandJournal> MatchService<J> {
         self.matches
             .iter()
             .filter_map(|(match_id, runtime)| {
-                runtime.deadline.map(|deadline| (*match_id, deadline))
+                runtime.deadline().map(|deadline| (*match_id, deadline))
             })
             .collect()
     }
@@ -609,20 +632,10 @@ impl<J: CommandJournal> MatchService<J> {
             .matches
             .get(&match_id)
             .ok_or(CommandError::MatchNotFound)?;
-        if !matches!(
-            runtime.state.status(),
-            pwmtf_eight_ball::MatchStatus::InProgress
-        ) {
-            return if runtime.deadline.is_none() {
-                Ok(None)
-            } else {
-                Err(CommandError::InvalidDeadlineState)
-            };
-        }
-        if runtime.deadline != Some(deadline)
-            || deadline.due_at > now
-            || runtime.revision != deadline.id.revision
-            || runtime.state.active_player() != deadline.id.player
+        let authority = &runtime.authority;
+        if runtime.deadline() != Some(deadline)
+            || authority.due_timeout(now.value()).is_none()
+            || authority.state().active_player() != deadline.id.player
         {
             return Ok(None);
         }
@@ -683,7 +696,7 @@ impl<J: CommandJournal> MatchService<J> {
             {
                 return Err(RecoveryError::InvalidRevision);
             }
-            if accepted.contains_key(&record.command_id) {
+            if accepted.contains_key(&command_key(record.command_id)) {
                 return Err(RecoveryError::DuplicateCommand);
             }
             let envelope = CommandEnvelope::from_bytes(&record.frame)
@@ -717,20 +730,19 @@ impl<J: CommandJournal> MatchService<J> {
             if restored.checksum() != record.checksum {
                 return Err(RecoveryError::ChecksumMismatch);
             }
-            let acknowledgement = CommandAcknowledgement {
-                revision: record.revision,
-                checksum: record.checksum,
-                result: record.result.clone(),
-                duplicate: false,
-                deadline: record.deadline,
-                playback_ticks: replayed_result.playback_ticks,
-            };
+            let seat = participants
+                .player_for(record.actor)
+                .ok_or(RecoveryError::InvalidFrame)?;
             accepted.insert(
-                record.command_id,
-                StoredAcknowledgement {
-                    actor: record.actor,
-                    frame: record.frame,
-                    acknowledgement,
+                command_key(record.command_id),
+                Accepted {
+                    seat,
+                    command: envelope.command,
+                    revision: record.revision,
+                    checksum: record.checksum,
+                    outcome: record.result,
+                    playback_ticks: replayed_result.playback_ticks,
+                    deadline: record.deadline.map(deadline_of),
                 },
             );
             previous_revision = record.revision;
@@ -746,14 +758,18 @@ impl<J: CommandJournal> MatchService<J> {
         if self.matches.contains_key(&match_id) {
             return Err(RecoveryError::AlreadyLoaded);
         }
+        let authority = Authority::restore(
+            state,
+            previous_revision,
+            records_last_deadline.map(deadline_of),
+            accepted,
+        )
+        .map_err(|_| RecoveryError::InvalidDeadline)?;
         self.matches.insert(
             match_id,
             MatchRuntime {
                 participants,
-                revision: previous_revision,
-                state,
-                deadline: records_last_deadline,
-                accepted,
+                authority,
             },
         );
         Ok(Some(previous_revision))
@@ -796,104 +812,45 @@ impl<J: CommandJournal> MatchService<J> {
             .participants
             .player_for(actor)
             .ok_or(CommandError::Unauthorized)?;
-        let frame = envelope.to_bytes();
-        if let Some(stored) = runtime.accepted.get(&envelope.command_id) {
-            if stored.actor == actor && stored.frame == frame {
-                let mut acknowledgement = stored.acknowledgement.clone();
-                acknowledgement.duplicate = true;
-                return Ok(acknowledgement);
-            }
-            return Err(CommandError::IdempotencyConflict);
-        }
-        if envelope.expected_revision != runtime.revision {
-            return Err(CommandError::StaleRevision {
-                expected: envelope.expected_revision,
-                actual: runtime.revision,
-            });
-        }
-        if !matches!(
-            runtime.state.status(),
-            pwmtf_eight_ball::MatchStatus::InProgress
-        ) {
-            return Err(CommandError::MatchCompleted);
-        }
-        if command_requires_active_player(envelope.command.command)
-            && runtime.state.active_player() != player
-        {
-            return Err(CommandError::WrongActor);
-        }
-        if let pwmtf_eight_ball::MatchCommand::Concede {
-            player: command_player,
-        } = envelope.command.command
-            && command_player != player
-        {
-            return Err(CommandError::WrongActor);
-        }
-
-        let mut candidate = runtime.state.clone();
-        let pwmtf_eight_ball::AppliedCommand {
-            result,
-            playback_ticks,
-        } = candidate
-            .apply_command_timed(envelope.command)
-            .map_err(|_| CommandError::Domain)?;
-        let revision = runtime
-            .revision
-            .checked_add(1)
-            .ok_or(CommandError::RevisionExhausted)?;
-        let checksum = candidate.checksum();
-        let deadline = if matches!(
-            candidate.status(),
-            pwmtf_eight_ball::MatchStatus::InProgress
-        ) {
-            DeadlineMillis::after_playback_and_turn(
-                now,
-                candidate.physics(),
-                playback_ticks,
-                candidate.rules(),
+        let submission = runtime
+            .authority
+            .submit(
+                command_key(envelope.command_id),
+                player,
+                envelope.expected_revision,
+                envelope.command,
+                now.value(),
             )
-            .map(|due_at| ScheduledDeadline {
-                id: DeadlineId {
-                    revision,
-                    player: candidate.active_player(),
-                },
-                due_at,
-            })
-        } else {
-            None
+            .map_err(|refusal| match refusal {
+                Refusal::StaleRevision { expected, actual } => {
+                    CommandError::StaleRevision { expected, actual }
+                }
+                Refusal::Ended => CommandError::MatchCompleted,
+                Refusal::Unauthorized(_) => CommandError::WrongActor,
+                Refusal::KeyConflict => CommandError::IdempotencyConflict,
+                Refusal::Rejected(_) => CommandError::Domain,
+                Refusal::RevisionExhausted => CommandError::RevisionExhausted,
+            })?;
+        let proposal = match submission {
+            Submission::Duplicate(accepted) => return Ok(acknowledgement(&accepted, true)),
+            Submission::New(proposal) => proposal,
         };
-        let acknowledgement = CommandAcknowledgement {
-            revision,
-            checksum,
-            result: result.clone(),
-            duplicate: false,
-            deadline,
-            playback_ticks,
-        };
+        let accepted = &proposal.accepted;
         self.journal
             .commit(AcceptedCommand {
                 match_id,
-                revision,
+                revision: accepted.revision,
                 command_id: envelope.command_id,
                 actor,
-                frame: frame.clone(),
-                result,
-                snapshot: candidate.to_bytes(),
-                checksum,
-                deadline,
+                frame: envelope.to_bytes(),
+                result: accepted.outcome.clone(),
+                snapshot: proposal.state.to_bytes(),
+                checksum: accepted.checksum,
+                deadline: accepted.deadline.map(scheduled),
             })
             .await?;
-        runtime.state = candidate;
-        runtime.revision = revision;
-        runtime.deadline = deadline;
-        runtime.accepted.insert(
-            envelope.command_id,
-            StoredAcknowledgement {
-                actor,
-                frame,
-                acknowledgement: acknowledgement.clone(),
-            },
-        );
+        let acknowledgement = acknowledgement(accepted, false);
+        runtime.authority.commit(*proposal);
         Ok(acknowledgement)
     }
 }
@@ -927,14 +884,6 @@ pub const fn timeout_command_id(deadline: DeadlineId) -> CommandId {
 pub fn is_timeout_command_id(command_id: CommandId) -> bool {
     let bytes = command_id.bytes();
     matches!(bytes[8], 1 | 2) && bytes[9..].iter().all(|byte| *byte == 0)
-}
-
-const fn command_requires_active_player(command: pwmtf_eight_ball::MatchCommand) -> bool {
-    matches!(
-        command,
-        pwmtf_eight_ball::MatchCommand::PlayShot { .. }
-            | pwmtf_eight_ball::MatchCommand::PlaceCueBall { .. }
-    )
 }
 
 #[cfg(test)]
@@ -1208,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_match_with_deadline_fails_scheduler_closed() {
+    fn terminal_match_with_deadline_fails_recovery_closed() {
         block_on(async {
             let mut service = service();
             service
@@ -1225,21 +1174,27 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let impossible = ScheduledDeadline {
+            let mut records = service.journal.records.clone();
+            records[0].deadline = Some(ScheduledDeadline {
                 id: DeadlineId {
                     revision: 1,
                     player: Player::One,
                 },
                 due_at: DeadlineMillis::new(1),
-            };
-            service.matches.get_mut(&MatchId::new(9)).unwrap().deadline = Some(impossible);
+            });
+            let mut recovered = MatchService::new(MemoryJournal::default());
             assert_eq!(
-                service
-                    .apply_due_deadline(MatchId::new(9), impossible, DeadlineMillis::new(1))
-                    .await,
-                Err(CommandError::InvalidDeadlineState)
+                recovered.restore_match(
+                    MatchId::new(9),
+                    Participants {
+                        player_one: AccountId::new(1),
+                        player_two: AccountId::new(2),
+                    },
+                    records
+                ),
+                Err(RecoveryError::InvalidDeadline)
             );
-            assert_eq!(service.journal.records.len(), 1);
+            assert!(recovered.match_state(MatchId::new(9)).is_none());
         });
     }
 
@@ -1586,8 +1541,8 @@ mod tests {
         block_on(async {
             let mut service = service();
             let runtime = service.matches.get_mut(&MatchId::new(9)).unwrap();
-            runtime.revision = u64::MAX;
-            let before = runtime.state.clone();
+            let before = runtime.authority.state().clone();
+            runtime.authority = Authority::restore(before.clone(), u64::MAX, None, []).unwrap();
             assert_eq!(
                 service
                     .apply_for_test(

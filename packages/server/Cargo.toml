@@ -22,6 +22,7 @@ openidconnect               = { workspace = true }
 pwmtf_billiards           = { path = "../billiards", version = "0.1.0" }
 pwmtf_eight_ball           = { path = "../eight_ball", version = "0.1.0" }
 pwmtf_protocol              = { path = "../protocol", version = "0.1.0" }
+pwmtf_sync = { path = "../sync", version = "0.1.0" }
 serde                       = { workspace = true }
 sha2                        = { workspace = true }
 switchy_database            = { workspace = true }

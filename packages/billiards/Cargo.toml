@@ -11,7 +11,8 @@ repository  = { workspace = true }
 version     = { workspace = true }
 
 [dependencies]
-thiserror = { workspace = true }
+pwmtf_sync = { path = "../sync", version = "0.1.0" }
+thiserror  = { workspace = true }
 
 [features]
 default          = []

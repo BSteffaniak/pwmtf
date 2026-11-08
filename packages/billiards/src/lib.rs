@@ -15,6 +15,8 @@ mod rack;
 pub use corpus::{ShotFixture, qualification_corpus, qualification_profile};
 pub use rack::{RackError, RackSeed, standard_rack};
 
+pub mod playback;
+
 /// Canonical table schema, including complete rolling and vertical spin state.
 pub const TABLE_STATE_VERSION: u16 = 2;
 mod motion;

@@ -20,7 +20,7 @@ Read `INVARIANTS.md` for durable architecture and `AGENTS.md` for contributor re
 
 ## Development
 
-The workspace contains `pwmtf_billiards` (deterministic physics), `pwmtf_eight_ball` (rules), `pwmtf_protocol`, `pwmtf_server`, and `pwmtf_client`. Use:
+The workspace contains `pwmtf_billiards` (deterministic physics and shot playback), `pwmtf_eight_ball` (rules), `pwmtf_sync` (game-agnostic authority and client replay), `pwmtf_protocol`, `pwmtf_server`, and `pwmtf_client`. The physics, rules and sync crates are reusable libraries; Cozy Lounge embeds them for its 3D table. Use:
 
 ```sh
 cargo fmt --check

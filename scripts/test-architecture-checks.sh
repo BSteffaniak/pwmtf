@@ -37,6 +37,18 @@ printf '%s\n' 'use switchy_database::Database;' > "$tmp/packages/billiards/src/l
 assert_rejected "persistence in the game domain"
 
 reset_fixture
+mkdir -p "$tmp/packages/sync/src"
+printf '%s\n' '[package]' 'name = "pwmtf_sync"' > "$tmp/packages/sync/Cargo.toml"
+printf '%s\n' 'use tokio::sync::Mutex;' > "$tmp/packages/sync/src/lib.rs"
+assert_rejected "an async runtime in sync"
+
+reset_fixture
+mkdir -p "$tmp/packages/sync/src"
+printf '%s\n' '[package]' 'name = "pwmtf_sync"' > "$tmp/packages/sync/Cargo.toml"
+printf '%s\n' 'use pwmtf_eight_ball::MatchState;' > "$tmp/packages/sync/src/lib.rs"
+assert_rejected "a specific game in sync"
+
+reset_fixture
 mkdir -p "$tmp/packages/common/src"
 printf '%s\n' '[package]' 'name = "pwmtf_common"' > "$tmp/packages/common/Cargo.toml"
 assert_rejected "a generic package directory"

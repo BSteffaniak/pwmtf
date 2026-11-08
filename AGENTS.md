@@ -20,6 +20,7 @@ Pool with More Than Friends (PWMTF) is a mobile-browser-first, two-player online
 ## Architecture
 
 - Canonical physics belongs in `pwmtf_billiards` and 8-ball rules in `pwmtf_eight_ball`, both independent of Bevy, transport, HTTP, authentication, and persistence. Keep them free of PWMTF product concerns: other hosts (such as Cozy Lounge) embed them.
+- Authoritative command acceptance, idempotency, deadlines and client replay belong in `pwmtf_sync`, which is generic over the game (`ReplayGame`) and sans-IO: no transport, persistence, identity, async runtime, or specific game. `pwmtf_server` and `pwmtf_client` are adapters over it.
 - Protocol crates own bounded versioned wire representations, never gameplay decisions.
 - The client owns input, rendering, audio, prediction, reconciliation, interpolation, and browser integration only.
 - The server owns identity, authorization, authoritative scheduling, persistence, recovery, and operational entry points.
