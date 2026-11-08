@@ -147,6 +147,10 @@ function u128Hex(value) {
 function matchDataset(session) {
   return evaluate(session, 'JSON.stringify(document.querySelector("#match-status")?.dataset ?? {})').then(JSON.parse);
 }
+// Imports the exact module instance the page loaded (assets are versioned).
+const opponentModule = `const moduleUrl = performance.getEntriesByType('resource').map(entry => entry.name)
+      .find(name => new URL(name).pathname === '/pwmtf_client.js');
+    const module = await import(moduleUrl);`;
 async function imageHash(session) {
   // Compare the rendered table only: HTML overlays such as the ticking turn
   // timer change every second regardless of canvas state.
@@ -344,11 +348,23 @@ try {
   const focusBar = {x: focusCanvas.x + focusCanvas.width / 2 + 565 * focusScale,
     y: focusCanvas.y + focusCanvas.height / 2};
   const focusBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
-  await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y, 0);
+  // Before anyone touches the cue this turn, the opponent already sees it
+  // exactly where the shooter's screen starts it.
+  // Wrapped in an object: a turn-start aim of exactly 0 radians is valid.
+  const {aim: observerStartAim} = await until('opponent shows the shooter cue at turn start', () => evaluate(focusOpponent, `(async () => {
+    ${opponentModule}
+    const cue = module.match_opponent_cue();
+    return cue === undefined || cue === null ? null : {aim: cue[0]};
+  })()`));
   await mouse(focusShooter, 'mousePressed', focusBar.x, focusBar.y, 1);
   await sleep(120);
   await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y + 100 * focusScale, 1);
   await until('focus match opponent sees charged drag', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(focusBefore).some(frame => !preview(frame).cancel && preview(frame).power > 1000));
+  const shooterStartSteps = preview(previews(focusOpponent, 'Network.webSocketFrameReceived').slice(focusBefore).find(frame => !preview(frame).cancel)).aim;
+  const observerStartSteps = Math.round(((observerStartAim / (2 * Math.PI)) % 1 + 1) % 1 * 10000) % 10000;
+  if (Math.min(Math.abs(shooterStartSteps - observerStartSteps), 10000 - Math.abs(shooterStartSteps - observerStartSteps)) > 1) {
+    throw new Error(`turn-start cue differs: shooter ${shooterStartSteps} steps, opponent ${observerStartSteps}`);
+  }
   await send('Target.activateTarget', {targetId: focusOpponentPage.targetId});
   const focusChargedImage = await imageHash(focusOpponent);
   const {targetId: focusInterruptionTab} = await send('Target.createTarget', {url: 'about:blank', browserContextId: focusShooterPage.browserContextId});
@@ -398,9 +414,6 @@ try {
   }
   // The opponent's cue eases between planning updates instead of stepping,
   // and stays visible, at rest, after the gesture ends.
-  const opponentModule = `const moduleUrl = performance.getEntriesByType('resource').map(entry => entry.name)
-      .find(name => new URL(name).pathname === '/pwmtf_client.js');
-    const module = await import(moduleUrl);`;
   await evaluate(focusOpponent, `(async () => {
     ${opponentModule}
     window.__pwmtfCueSamples = [];

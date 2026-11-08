@@ -101,7 +101,9 @@ pub enum Group {
 }
 
 impl Group {
-    const fn contains(self, ball: BallId) -> bool {
+    /// Returns whether `ball` belongs to this group.
+    #[must_use]
+    pub const fn contains(self, ball: BallId) -> bool {
         match self {
             Self::Solids => ball.number() >= 1 && ball.number() <= 7,
             Self::Stripes => ball.number() >= 9 && ball.number() <= 15,
@@ -114,6 +116,17 @@ impl Group {
             Self::Stripes => Self::Solids,
         }
     }
+}
+
+/// What a player must pocket next.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Objective {
+    /// Groups are not assigned yet; any object ball except the 8 counts.
+    OpenTable,
+    /// The player's assigned group still has balls on the table.
+    Group(Group),
+    /// The player's group is cleared: the 8-ball in a called pocket wins.
+    EightBall,
 }
 
 /// Terminal match reason.
@@ -716,6 +729,22 @@ impl MatchState {
             (Some(group), Player::Two) => Some(group.opponent()),
             (None, _) => None,
         }
+    }
+
+    /// Returns what `player` must pocket next.
+    #[must_use]
+    pub fn objective(&self, player: Player) -> Objective {
+        match self.group(player) {
+            None => Objective::OpenTable,
+            Some(_) if self.player_cleared_group(player, &self.table) => Objective::EightBall,
+            Some(group) => Objective::Group(group),
+        }
+    }
+
+    /// Returns whether the next shot is a break.
+    #[must_use]
+    pub const fn break_pending(&self) -> bool {
+        self.break_pending
     }
 
     /// Canonically simulates and resolves a shot from the active player.
@@ -1373,6 +1402,50 @@ mod tests {
             Player::One,
         )
         .expect("match starts")
+    }
+
+    #[test]
+    fn objective_moves_from_open_table_to_group_to_eight_ball() {
+        let mut state = match_state();
+        assert!(state.break_pending());
+        assert_eq!(state.objective(Player::One), Objective::OpenTable);
+        state.player_one_group = Some(Group::Stripes);
+        state.break_pending = false;
+        assert_eq!(
+            state.objective(Player::One),
+            Objective::Group(Group::Stripes)
+        );
+        assert_eq!(
+            state.objective(Player::Two),
+            Objective::Group(Group::Solids)
+        );
+        // Pocket every stripe: player one is now on the 8, player two is not.
+        let balls = state
+            .table()
+            .balls()
+            .iter()
+            .map(|ball| {
+                let mut ball = *ball;
+                if Group::Stripes.contains(ball.id) {
+                    ball.pocketed = true;
+                }
+                ball
+            })
+            .collect();
+        state.table = VersionedTableState::new(
+            state.table.version(),
+            state.geometry,
+            state.table.tick(),
+            balls,
+        )
+        .unwrap();
+        assert_eq!(state.objective(Player::One), Objective::EightBall);
+        assert_eq!(
+            state.objective(Player::Two),
+            Objective::Group(Group::Solids)
+        );
+        assert!(Group::Solids.contains(BallId::new(7).unwrap()));
+        assert!(!Group::Solids.contains(BallId::new(8).unwrap()));
     }
 
     fn command(aim: u16, power: u16) -> VersionedShotCommand {

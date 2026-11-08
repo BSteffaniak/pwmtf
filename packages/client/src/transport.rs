@@ -8,8 +8,9 @@
 //! server's `MatchState` is always applied as authority.
 
 use pwmtf_game_domain::{
-    CompletionReason, MatchCommand, MatchState, MatchStatus, PhysicsProfile, Player, PocketId,
-    TableGeometry, Vector, VersionedShotCommand, VersionedTableState,
+    CompletionReason, Foul, Group, MatchCommand, MatchCommandResult, MatchState, MatchStatus,
+    Objective, PhysicsProfile, Player, PocketId, TableGeometry, Vector, VersionedShotCommand,
+    VersionedTableState,
 };
 use pwmtf_protocol::{
     ClientMessage, CommandEnvelope, CommandId, MatchStateMessage, ProtocolError, RejectReason,
@@ -126,12 +127,68 @@ impl PreviewState {
     }
 }
 
+/// What the most recent accepted shot did, for the shot summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShotSummary {
+    revision: u64,
+    shooter: Player,
+    pocketed: Vec<u8>,
+    fouls: Vec<Foul>,
+    assigned_group: Option<Group>,
+    kept_turn: bool,
+    ball_in_hand: bool,
+    reracked: bool,
+}
+
+impl ShotSummary {
+    /// Replays an accepted shot on the state before it. Canonical physics is
+    /// deterministic, so this reproduces the server's resolution exactly.
+    fn replay(
+        before: &MatchState,
+        command: pwmtf_game_domain::VersionedMatchCommand,
+        revision: u64,
+    ) -> Option<Self> {
+        let mut after = before.clone();
+        let MatchCommandResult::Shot(resolution) = after.apply_command(command).ok()? else {
+            return None;
+        };
+        let pocketed = if resolution.reracked {
+            Vec::new()
+        } else {
+            before
+                .table()
+                .balls()
+                .iter()
+                .zip(after.table().balls())
+                .filter(|(was, now)| !was.pocketed && now.pocketed)
+                .map(|(ball, _)| ball.id.number())
+                .collect()
+        };
+        Some(Self {
+            revision,
+            shooter: resolution.shooter,
+            pocketed,
+            fouls: resolution.fouls,
+            assigned_group: resolution.assigned_group,
+            kept_turn: resolution.next_player == Some(resolution.shooter),
+            ball_in_hand: resolution.ball_in_hand,
+            reracked: resolution.reracked,
+        })
+    }
+}
+
 struct MatchSession {
     match_id: u128,
     seat: Option<Player>,
     prediction: Option<PredictionState>,
     deadline_at_ms: Option<u64>,
     pending: Option<PendingCommand>,
+    /// The local player's 8-ball call, valid only for the revision it was made at.
+    called_pocket: Option<(u64, PocketId)>,
+    last_shot: Option<ShotSummary>,
+    /// Where every screen starts the cue this turn: the aim of the shot that
+    /// led here, carried across placements and timeouts.
+    turn_aim: Option<(u64, pwmtf_game_domain::Aim)>,
     playback: Option<ShotPlayback>,
 }
 
@@ -143,6 +200,9 @@ impl MatchSession {
             prediction: None,
             deadline_at_ms: None,
             pending: None,
+            called_pocket: None,
+            last_shot: None,
+            turn_aim: None,
             playback: None,
         }
     }
@@ -492,6 +552,8 @@ impl SessionTransport {
         self.emit_match();
     }
 
+    // One cohesive transition: reconcile, playback, pending command and summary.
+    #[allow(clippy::too_many_lines)]
     fn receive_match_state(&mut self, message: MatchStateMessage) -> Result<(), PredictionError> {
         let Some(session) = self
             .session
@@ -543,6 +605,25 @@ impl SessionTransport {
             }
             std::cmp::Ordering::Greater => {
                 revision_changed = true;
+                session.turn_aim = match message.last_command.map(|last| last.command.command) {
+                    Some(MatchCommand::PlayShot { shot, .. }) => Some((message.revision, shot.aim)),
+                    // The cue does not move during a placement or timeout.
+                    Some(_) if message.revision == local + 1 => session
+                        .turn_aim
+                        .filter(|(at, _)| *at == local)
+                        .map(|(_, aim)| (message.revision, aim)),
+                    _ => None,
+                };
+                session.last_shot = message
+                    .last_command
+                    .filter(|_| message.revision == local + 1)
+                    .and_then(|last| {
+                        ShotSummary::replay(
+                            prediction.authoritative(),
+                            last.command,
+                            message.revision,
+                        )
+                    });
                 let ours = session.pending.is_some_and(|pending| {
                     message.last_command.map_or_else(
                         || {
@@ -1024,6 +1105,81 @@ impl SessionTransport {
             .and_then(|(value, _)| (!value.cancel).then_some(value))
     }
 
+    /// Whether the local player must call a pocket for the 8-ball now.
+    #[must_use]
+    pub fn calling_eight(&self) -> bool {
+        self.accepts_active_player_command()
+            && self.session.as_ref().is_some_and(|session| {
+                session
+                    .seat
+                    .zip(session.prediction.as_ref())
+                    .is_some_and(|(seat, prediction)| {
+                        prediction.authoritative().objective(seat) == Objective::EightBall
+                    })
+            })
+    }
+
+    /// Records the local player's 8-ball call for this turn.
+    pub fn set_called_pocket(&mut self, pocket: PocketId) {
+        if !self.calling_eight() {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(revision) = session
+            .prediction
+            .as_ref()
+            .map(PredictionState::authoritative_revision)
+        else {
+            return;
+        };
+        session.called_pocket = Some((revision, pocket));
+        self.emit_match();
+    }
+
+    /// The local player's 8-ball call for the current turn, if made.
+    #[must_use]
+    pub fn called_pocket(&self) -> Option<PocketId> {
+        let session = self.session.as_ref()?;
+        let revision = session.prediction.as_ref()?.authoritative_revision();
+        session
+            .called_pocket
+            .filter(|(called_at, _)| *called_at == revision)
+            .map(|(_, pocket)| pocket)
+    }
+
+    /// Where the cue starts this turn, identically on both players' screens:
+    /// the aim of the shot that led here, or, without one (a fresh rack or a
+    /// reconnect), from the cue ball toward the table's center.
+    #[must_use]
+    pub fn turn_start_aim(&self) -> Option<pwmtf_game_domain::Aim> {
+        let session = self.session.as_ref()?;
+        let prediction = session.prediction.as_ref()?;
+        let revision = prediction.authoritative_revision();
+        if let Some((at, aim)) = session.turn_aim
+            && at == revision
+        {
+            return Some(aim);
+        }
+        let cue = prediction
+            .authoritative()
+            .table()
+            .ball(pwmtf_game_domain::BallId::CUE)?;
+        #[allow(clippy::cast_precision_loss)]
+        let angle = (-(cue.position.y.micros() as f64)).atan2(-(cue.position.x.micros() as f64));
+        let turns = angle.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let steps = (turns * f64::from(pwmtf_game_domain::Aim::STEPS_PER_TURN)).round() as u16
+            % pwmtf_game_domain::Aim::STEPS_PER_TURN;
+        pwmtf_game_domain::Aim::new(steps).ok()
+    }
+
+    /// Asks the page to prompt for a pocket call after a blocked release.
+    pub fn request_pocket_call(&mut self) {
+        self.push_event("hint", "{\"reason\":\"call-pocket\"}".to_owned());
+    }
+
     /// Returns where the opponent's cue belongs during their turn: their live
     /// planning when it is fresh, otherwise resting at their last aim with no
     /// power. `None` outside the opponent's turn, so the cue is never shown
@@ -1042,7 +1198,9 @@ impl SessionTransport {
             .resting
             .filter(|preview| preview.revision == revision);
         Some(OpponentCueTarget {
-            aim: resting.map(|preview| preview.aim),
+            aim: resting
+                .map(|preview| preview.aim)
+                .or_else(|| self.turn_start_aim()),
             power: pwmtf_game_domain::ShotPower::new(0).ok()?,
             spin: resting.map_or(pwmtf_game_domain::Spin::CENTER, |preview| preview.spin),
         })
@@ -1289,11 +1447,33 @@ impl SessionTransport {
             clock.offset_ms.round() as i64,
             clock.uncertainty_ms.ceil().max(0.0) as u64,
         );
+        let opponent = match seat {
+            Player::One => Player::Two,
+            Player::Two => Player::One,
+        };
+        let pocketed = state
+            .table()
+            .balls()
+            .iter()
+            .filter(|ball| ball.pocketed && ball.id.number() != 0)
+            .map(|ball| ball.id.number().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let called = self.called_pocket().map_or_else(
+            || "null".to_owned(),
+            |pocket| format!("\"{}\"", pocket_label(pocket)),
+        );
+        let last_shot = session
+            .last_shot
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), shot_summary_json);
         Some(format!(
             "{{\"match_id\":\"{}\",\"revision\":{},\"seat\":{},\"active_player\":{},\
              \"winner\":{},\"completion_reason\":\"{}\",\"ball_in_hand\":{},\
              \"pending\":{},\"playing\":{},\"deadline_at_ms\":{},\
-             \"server_offset_ms\":{},\"clock_uncertainty_ms\":{}}}",
+             \"server_offset_ms\":{},\"clock_uncertainty_ms\":{},\
+             \"my_target\":\"{}\",\"opponent_target\":\"{}\",\"on_break\":{},\
+             \"pocketed\":[{}],\"calling_eight\":{},\"called_pocket\":{},\"last_shot\":{}}}",
             session.match_id,
             prediction.authoritative_revision(),
             player_number(seat),
@@ -1306,8 +1486,78 @@ impl SessionTransport {
             deadline,
             offset,
             uncertainty,
+            objective_label(state.objective(seat)),
+            objective_label(state.objective(opponent)),
+            state.break_pending(),
+            pocketed,
+            self.calling_eight(),
+            called,
+            last_shot,
         ))
     }
+}
+
+const fn objective_label(objective: Objective) -> &'static str {
+    match objective {
+        Objective::OpenTable => "open",
+        Objective::Group(Group::Solids) => "solids",
+        Objective::Group(Group::Stripes) => "stripes",
+        Objective::EightBall => "eight",
+    }
+}
+
+/// Stable pocket names shared with the page.
+#[must_use]
+pub const fn pocket_label(pocket: PocketId) -> &'static str {
+    match pocket {
+        PocketId::TopLeft => "top-left",
+        PocketId::TopCenter => "top-center",
+        PocketId::TopRight => "top-right",
+        PocketId::BottomLeft => "bottom-left",
+        PocketId::BottomCenter => "bottom-center",
+        PocketId::BottomRight => "bottom-right",
+    }
+}
+
+fn shot_summary_json(summary: &ShotSummary) -> String {
+    let pocketed = summary
+        .pocketed
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let fouls = summary
+        .fouls
+        .iter()
+        .map(|foul| {
+            format!(
+                "\"{}\"",
+                match foul {
+                    Foul::Scratch => "scratch",
+                    Foul::NoObjectContact => "no-contact",
+                    Foul::WrongFirstContact => "wrong-first-contact",
+                    Foul::NoRailAfterContact => "no-rail",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let group = summary.assigned_group.map_or("null", |group| match group {
+        Group::Solids => "\"solids\"",
+        Group::Stripes => "\"stripes\"",
+    });
+    format!(
+        "{{\"revision\":{},\"shooter\":{},\"pocketed\":[{}],\"fouls\":[{}],\
+         \"assigned_group\":{},\"kept_turn\":{},\"ball_in_hand\":{},\"reracked\":{}}}",
+        summary.revision,
+        player_number(summary.shooter),
+        pocketed,
+        fouls,
+        group,
+        summary.kept_turn,
+        summary.ball_in_hand,
+        summary.reracked,
+    )
 }
 
 const fn player_number(player: Player) -> u8 {
@@ -1800,6 +2050,69 @@ mod tests {
     }
 
     #[test]
+    fn accepted_shot_sets_summary_and_shared_turn_start_aim() {
+        let state = initial_state();
+        let (next, ticks) = accepted_shot(&state, 8_000);
+        let last = LastCommand {
+            command_id: CommandId::new([6; 16]),
+            actor: Player::One,
+            command: VersionedMatchCommand::new(MatchCommand::PlayShot {
+                shot: shot(8_000),
+                called_pocket: None,
+            }),
+            playback_ticks: ticks,
+        };
+        let mut observer = ready(Player::Two, &state, 0);
+        let mut shooter = ready(Player::One, &state, 0);
+        let before = observer.turn_start_aim();
+        assert_eq!(
+            before,
+            shooter.turn_start_aim(),
+            "both screens agree before any shot"
+        );
+        observer.take_events();
+        observer.receive(&state_frame(&next, 1, Player::Two, Some(last)), 50.0);
+        shooter.receive(&state_frame(&next, 1, Player::One, Some(last)), 50.0);
+        // The next turn starts with the cue where the shot left it, on both screens.
+        assert_eq!(observer.turn_start_aim(), Some(shot(8_000).aim));
+        assert_eq!(shooter.turn_start_aim(), Some(shot(8_000).aim));
+        let detail = observer
+            .take_events()
+            .into_iter()
+            .rfind(|event| event.name == "match")
+            .unwrap()
+            .detail;
+        assert!(
+            detail.contains("\"last_shot\":{\"revision\":1,\"shooter\":1,"),
+            "{detail}"
+        );
+        assert!(detail.contains("\"on_break\":false"), "{detail}");
+    }
+
+    #[test]
+    fn pocket_calls_only_while_on_the_eight_and_reset_each_turn() {
+        let state = initial_state();
+        let mut shooter = ready(Player::One, &state, 0);
+        // Open table: no call is taken.
+        assert!(!shooter.calling_eight());
+        shooter.set_called_pocket(PocketId::TopLeft);
+        assert_eq!(shooter.called_pocket(), None);
+        // A call recorded at an earlier revision is not valid for this turn.
+        if let Some(session) = shooter.session.as_mut() {
+            session.called_pocket = Some((7, PocketId::TopLeft));
+        }
+        assert_eq!(shooter.called_pocket(), None);
+        shooter.take_events();
+        shooter.request_pocket_call();
+        assert!(
+            shooter
+                .take_events()
+                .iter()
+                .any(|event| event.name == "hint" && event.detail.contains("call-pocket"))
+        );
+    }
+
+    #[test]
     fn observer_plays_back_only_from_the_immediately_preceding_revision() {
         let state = initial_state();
         let (next, ticks) = accepted_shot(&state, 8_000);
@@ -2029,7 +2342,9 @@ mod tests {
                 "{{\"match_id\":\"{MATCH}\",\"revision\":0,\"seat\":1,\"active_player\":1,\
                  \"winner\":0,\"completion_reason\":\"\",\"ball_in_hand\":false,\
                  \"pending\":false,\"playing\":false,\"deadline_at_ms\":1000000,\
-                 \"server_offset_ms\":0,\"clock_uncertainty_ms\":0}}"
+                 \"server_offset_ms\":0,\"clock_uncertainty_ms\":0,\
+                 \"my_target\":\"open\",\"opponent_target\":\"open\",\"on_break\":true,\
+                 \"pocketed\":[],\"calling_eight\":false,\"called_pocket\":null,\"last_shot\":null}}"
             )
         );
         transport.receive(&state_frame(&state, 0, Player::One, None), 2.0);
@@ -2145,9 +2460,11 @@ mod tests {
                 now,
             );
         };
-        // Visible before the opponent has aimed at all.
+        // Visible before the opponent has aimed at all, at the turn-start aim
+        // that their own screen uses too.
         let idle = observer.opponent_cue_target(100.0).unwrap();
-        assert_eq!(idle.aim, None);
+        assert_eq!(idle.aim, observer.turn_start_aim());
+        assert!(idle.aim.is_some());
         assert_eq!(idle.power.units(), 0);
         // A live preview drives it.
         let mut charged = preview(0, 1, false);

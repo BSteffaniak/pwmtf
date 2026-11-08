@@ -33,6 +33,8 @@ const openSettingsButton = document.querySelector("#open-settings");
 const matchHud = document.querySelector("#match-hud");
 const hudPlayers = document.querySelector("#hud-players");
 const hudTurn = document.querySelector("#hud-turn");
+const rackSelf = document.querySelector("#rack-self");
+const rackOpponent = document.querySelector("#rack-opponent");
 const currentGameCard = document.querySelector("#current-game");
 const currentGameLabel = document.querySelector("#current-game-label");
 const rotateHintText = document.querySelector("#rotate-hint-text");
@@ -318,6 +320,10 @@ const matchOpponents = new Map();
 let pendingIncoming = { challenges: 0, rematches: 0 };
 let lastToastedRejection = null;
 let opponentLookupFor = null;
+// The table as of the last settled shot, so racks and summaries update when
+// the balls stop rather than the moment the shot is accepted.
+let settledMatch = null;
+let lastSummarizedShot = null;
 
 // Session state. The WASM transport owns the single `/ws` socket, retries,
 // pings, clock sync, subscriptions, and pending commands; this page only
@@ -449,6 +455,9 @@ function handleSessionEvent(name, detailJson) {
       break;
     case "subscription-denied":
       onSubscriptionDenied(detail);
+      break;
+    case "hint":
+      showHint(detail);
       break;
     default:
       break;
@@ -814,6 +823,117 @@ function renderPlayBadge() {
   incomingCard.hidden = count === 0;
 }
 
+const BALL_COLORS = {
+  1: "#f2c230", 2: "#2457c5", 3: "#d43a2f", 4: "#6b3fa0",
+  5: "#f07f22", 6: "#1f8a4c", 7: "#7c2230", 8: "#151515",
+};
+const GROUP_BALLS = {
+  solids: [1, 2, 3, 4, 5, 6, 7],
+  stripes: [9, 10, 11, 12, 13, 14, 15],
+};
+
+function pocketName(pocket) {
+  return String(pocket).replace("-", " ");
+}
+
+function ballList(numbers) {
+  const items = numbers.map(String);
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+
+/// What the local player should do now, appended to "Your turn".
+function objectiveHint(match) {
+  if (match.on_break) {
+    return " · break";
+  }
+  if (match.ball_in_hand) {
+    return " · ball in hand: drag the cue ball";
+  }
+  if (match.my_target === "eight") {
+    return match.called_pocket
+      ? ` · 8-ball → ${pocketName(match.called_pocket)}`
+      : " · call a pocket for the 8";
+  }
+  if (match.my_target === "solids" || match.my_target === "stripes") {
+    return ` · ${match.my_target}`;
+  }
+  return " · open table";
+}
+
+function miniBall(number, pocketed) {
+  const ball = document.createElement("i");
+  ball.className = `mini-ball${number > 8 ? " stripe" : ""}${number === 8 ? " eight" : ""}${pocketed ? " pocketed" : ""}`;
+  ball.style.setProperty("--ball", BALL_COLORS[number > 8 ? number - 8 : number]);
+  ball.title = pocketed ? `${number} (pocketed)` : String(number);
+  return ball;
+}
+
+function renderRack(rack, target, pocketed) {
+  rack.replaceChildren();
+  if (target === "eight") {
+    rack.append(miniBall(8, false));
+  } else if (Object.hasOwn(GROUP_BALLS, target)) {
+    rack.append(...GROUP_BALLS[target].map((number) => miniBall(number, pocketed.has(number))));
+  }
+  rack.hidden = rack.childElementCount === 0;
+}
+
+function renderRacks(match) {
+  const live = match !== null && currentMatchId !== null && match.winner === 0;
+  const pocketed = new Set(live && Array.isArray(match.pocketed) ? match.pocketed : []);
+  renderRack(rackSelf, live ? match.my_target : null, pocketed);
+  renderRack(rackOpponent, live ? match.opponent_target : null, pocketed);
+}
+
+const FOUL_TEXT = {
+  scratch: "Scratch",
+  "no-contact": "Missed every ball",
+  "wrong-first-contact": "Hit the wrong ball first",
+  "no-rail": "No ball reached a rail",
+};
+
+/// One line describing a finished shot, shown once when the balls settle.
+function summarizeShot(match, name) {
+  const shot = match.last_shot;
+  if (shot === null || typeof shot !== "object" || shot.revision === lastSummarizedShot) {
+    return;
+  }
+  lastSummarizedShot = shot.revision;
+  if (match.winner !== 0) {
+    return;
+  }
+  const mine = shot.shooter === match.seat;
+  const who = mine ? "You" : name;
+  const parts = [];
+  if (shot.reracked) {
+    parts.push("8-ball on the break: re-rack");
+  } else if (shot.pocketed.length > 0) {
+    parts.push(`${who} pocketed ${ballList(shot.pocketed)}`);
+  }
+  if (shot.assigned_group === "solids" || shot.assigned_group === "stripes") {
+    const other = shot.assigned_group === "solids" ? "stripes" : "solids";
+    parts.push(mine ? `You're ${shot.assigned_group}!` : `${name} is ${shot.assigned_group}, you're ${other}`);
+  }
+  const foul = shot.fouls.find((value) => Object.hasOwn(FOUL_TEXT, value));
+  if (foul) {
+    parts.push(`${FOUL_TEXT[foul]}!`);
+  }
+  if (shot.ball_in_hand) {
+    parts.push(mine ? `${name} has ball in hand` : "You have ball in hand");
+  } else if (shot.kept_turn) {
+    parts.push(mine ? "Still your turn" : `${name} shoots again`);
+  } else if (parts.length === 0) {
+    parts.push(mine ? `No ball in · ${name}'s turn` : `${name} missed · your turn`);
+  }
+  socialStatus.textContent = parts.join(" · ");
+}
+
+function showHint(detail) {
+  if (detail?.reason === "call-pocket") {
+    socialStatus.textContent = "Tap the pocket you're aiming the 8-ball at, then shoot.";
+  }
+}
+
 function shortRejection(reason) {
   return reason === "wrong-turn" ? "Not your turn" : "Move not accepted";
 }
@@ -827,6 +947,8 @@ function renderMatchHud() {
     hudPlayers.textContent = "";
     hudTurn.textContent = "Practice table";
     matchHud.dataset.tone = "";
+    settledMatch = null;
+    renderRacks(null);
     return;
   }
   const opponent = matchOpponents.get(currentMatchId);
@@ -840,6 +962,9 @@ function renderMatchHud() {
   currentGameLabel.textContent = `Playing ${opponentName(opponent)}.`;
   rotateHintText.textContent = `Your game vs ${opponentName(opponent)} is on. Turn your phone sideways to play.`;
   const match = currentMatch;
+  if (settledMatch !== null && settledMatch.match_id !== currentMatchId) {
+    settledMatch = null;
+  }
   let text;
   let tone = "";
   if (matchStatus.dataset.denied === "true") {
@@ -860,13 +985,18 @@ function renderMatchHud() {
   } else if (match.playing) {
     text = "Shot in progress";
   } else if (match.active_player === match.seat) {
-    text = match.ball_in_hand ? "Your turn · ball in hand" : "Your turn";
+    text = `Your turn${objectiveHint(match)}`;
     tone = "you";
   } else {
-    text = `${name}'s turn`;
+    text = `${name}'s turn${match.opponent_target === "eight" ? " · on the 8" : ""}`;
   }
   hudTurn.textContent = text;
   matchHud.dataset.tone = tone;
+  if (match !== null && !match.playing) {
+    settledMatch = match;
+    summarizeShot(match, name);
+  }
+  renderRacks(settledMatch);
   if (lastRejection !== null && lastRejection !== lastToastedRejection) {
     socialStatus.textContent = REJECTION_MESSAGES[lastRejection];
   }

@@ -15,7 +15,7 @@ pub use rules::{
     AppliedCommand, CompletionReason, Foul, Group, MATCH_COMMAND_RESULT_VERSION,
     MATCH_COMMAND_VERSION, MATCH_CONFIGURATION_VERSION, MATCH_STATE_VERSION, MatchCommand,
     MatchCommandResult, MatchConfiguration, MatchDecodeError, MatchError, MatchOutcome,
-    MatchResultDecodeError, MatchState, MatchStatus, Player, RULES_PROFILE_VERSION,
+    MatchResultDecodeError, MatchState, MatchStatus, Objective, Player, RULES_PROFILE_VERSION,
     RematchMetadata, RulesProfile, RulesProfileError, ShotResolution, VersionedMatchCommand,
 };
 

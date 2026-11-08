@@ -48,8 +48,17 @@ const MIN_AIM_LEVER: f32 = BALL_RADIUS * 5.0;
 /// points the cue at the tapped spot instead of rotating it.
 const TAP_SLOP: f32 = 14.0;
 const TAP_MAX_SECONDS: f64 = 0.3;
-#[cfg(target_arch = "wasm32")]
-const POCKET_SELECTION_RADIUS: f32 = 44.0;
+/// Finger-sized tap radius around a pocket when calling the 8-ball.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const POCKET_SELECTION_RADIUS: f32 = 60.0;
+const POCKET_IDS: [pwmtf_game_domain::PocketId; 6] = [
+    pwmtf_game_domain::PocketId::TopLeft,
+    pwmtf_game_domain::PocketId::TopCenter,
+    pwmtf_game_domain::PocketId::TopRight,
+    pwmtf_game_domain::PocketId::BottomLeft,
+    pwmtf_game_domain::PocketId::BottomCenter,
+    pwmtf_game_domain::PocketId::BottomRight,
+];
 #[cfg(target_arch = "wasm32")]
 static SPIN_SIDE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 #[cfg(target_arch = "wasm32")]
@@ -121,8 +130,9 @@ struct PrototypeInput {
     power: f32,
     #[cfg(target_arch = "wasm32")]
     spin: Vec2,
+    /// Revision whose turn-start aim has been applied to the local cue.
     #[cfg(target_arch = "wasm32")]
-    called_pocket: Option<pwmtf_game_domain::PocketId>,
+    aim_revision: Option<u64>,
     #[cfg(target_arch = "wasm32")]
     placing_cue_ball: bool,
     #[cfg(target_arch = "wasm32")]
@@ -198,7 +208,7 @@ impl Default for PrototypeInput {
             #[cfg(target_arch = "wasm32")]
             spin: Vec2::ZERO,
             #[cfg(target_arch = "wasm32")]
-            called_pocket: None,
+            aim_revision: None,
             #[cfg(target_arch = "wasm32")]
             placing_cue_ball: false,
             #[cfg(target_arch = "wasm32")]
@@ -532,6 +542,7 @@ fn main() {
                 update_input,
                 animate_opponent_cue,
                 aim_preview::draw,
+                draw_pocket_call,
                 update_aim,
                 #[cfg(target_arch = "wasm32")]
                 synchronize_canonical_presentation,
@@ -1108,8 +1119,10 @@ fn pointer_on_fine_aim(cursor: Vec2, size: Vec2) -> bool {
 }
 
 fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
+    // Pockets take taps only while calling the 8-ball; otherwise a press near
+    // a pocket aims like anywhere else.
     #[cfg(target_arch = "wasm32")]
-    if selected_pocket(cursor, window_size).is_some() {
+    if browser_transport::calling_eight() && selected_pocket(cursor, window_size).is_some() {
         return PointerContact::Auxiliary;
     }
     if pointer_on_power_bar(cursor, window_size) {
@@ -1206,10 +1219,10 @@ fn update_from_pointer(
             }
             return;
         }
-        if input.pointer_contact == PointerContact::Auxiliary
-            && let Some(pocket) = selected_pocket(cursor, window_size)
-        {
-            input.called_pocket = Some(pocket);
+        if input.pointer_contact == PointerContact::Auxiliary {
+            if let Some(pocket) = selected_pocket(cursor, window_size) {
+                browser_transport::set_called_pocket(pocket);
+            }
             return;
         }
     }
@@ -1263,41 +1276,68 @@ fn screen_to_canonical(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_dom
     Some(pwmtf_game_domain::Vector::from_micros(x, y))
 }
 
-#[cfg(target_arch = "wasm32")]
+/// World position of a named pocket, matching the canonical table (y up).
+const fn pocket_world(pocket: pwmtf_game_domain::PocketId) -> Vec2 {
+    use pwmtf_game_domain::PocketId;
+    let half = Vec2::new(TABLE_SIZE.x / 2.0, TABLE_SIZE.y / 2.0);
+    match pocket {
+        PocketId::TopLeft => Vec2::new(TABLE_CENTER_X - half.x, half.y),
+        PocketId::TopCenter => Vec2::new(TABLE_CENTER_X, half.y),
+        PocketId::TopRight => Vec2::new(TABLE_CENTER_X + half.x, half.y),
+        PocketId::BottomLeft => Vec2::new(TABLE_CENTER_X - half.x, -half.y),
+        PocketId::BottomCenter => Vec2::new(TABLE_CENTER_X, -half.y),
+        PocketId::BottomRight => Vec2::new(TABLE_CENTER_X + half.x, -half.y),
+    }
+}
+
+/// The pocket under a tap, if any.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn selected_pocket(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_domain::PocketId> {
-    let scale = (window_size / DESIGN_SIZE).min_element();
-    let offset = (window_size - DESIGN_SIZE * scale) / 2.0;
-    let design_cursor = (cursor - offset) / scale;
-    let screen_pockets = [
-        (
-            pwmtf_game_domain::PocketId::TopLeft,
-            Vec2::new(145.0, 600.0),
-        ),
-        (
-            pwmtf_game_domain::PocketId::TopCenter,
-            Vec2::new(625.0, 600.0),
-        ),
-        (
-            pwmtf_game_domain::PocketId::TopRight,
-            Vec2::new(1_105.0, 600.0),
-        ),
-        (
-            pwmtf_game_domain::PocketId::BottomLeft,
-            Vec2::new(145.0, 120.0),
-        ),
-        (
-            pwmtf_game_domain::PocketId::BottomCenter,
-            Vec2::new(625.0, 120.0),
-        ),
-        (
-            pwmtf_game_domain::PocketId::BottomRight,
-            Vec2::new(1_105.0, 120.0),
-        ),
-    ];
-    screen_pockets
+    let position = pointer_world(cursor, window_size);
+    if !position.is_finite() {
+        return None;
+    }
+    POCKET_IDS
         .into_iter()
-        .find(|(_, position)| design_cursor.distance(*position) <= POCKET_SELECTION_RADIUS)
+        .map(|pocket| (pocket, position.distance(pocket_world(pocket))))
+        .filter(|(_, distance)| *distance <= POCKET_SELECTION_RADIUS)
+        .min_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(pocket, _)| pocket)
+}
+
+/// Lights every pocket while the local player calls the 8-ball, with a solid
+/// marker on the called one.
+#[allow(clippy::needless_pass_by_value)]
+fn draw_pocket_call(mut gizmos: Gizmos, time: Res<Time<Real>>) {
+    #[cfg(target_arch = "wasm32")]
+    let (calling, called) = (
+        browser_transport::calling_eight(),
+        browser_transport::called_pocket(),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    let (calling, called): (bool, Option<pwmtf_game_domain::PocketId>) = (false, None);
+    if !calling {
+        return;
+    }
+    let pulse = time
+        .elapsed_secs()
+        .mul_add(4.0, 0.0)
+        .sin()
+        .mul_add(0.25, 0.75);
+    for pocket in POCKET_IDS {
+        let center = pocket_world(pocket);
+        if called == Some(pocket) {
+            gizmos.circle_2d(center, BALL_RADIUS * 2.6, Color::srgb(0.96, 0.8, 0.35));
+            gizmos.circle_2d(center, BALL_RADIUS * 2.0, Color::srgb(0.96, 0.8, 0.35));
+            gizmos.circle_2d(center, BALL_RADIUS * 1.4, Color::srgb(0.96, 0.8, 0.35));
+        } else {
+            gizmos.circle_2d(
+                center,
+                BALL_RADIUS * 2.6,
+                Color::srgba(0.96, 0.8, 0.35, 0.55 * pulse),
+            );
+        }
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1351,6 +1391,8 @@ fn update_input(
     time: Res<Time<Real>>,
 ) {
     let mouse_is_pressed = mouse.pressed(MouseButton::Left);
+    #[cfg(target_arch = "wasm32")]
+    apply_turn_start_aim(&mut input);
     #[cfg(target_arch = "wasm32")]
     if let Some(sequence) = browser_transport::retry_pending_cancel() {
         input.preview_sequence = input.preview_sequence.max(sequence.saturating_add(1));
@@ -1419,7 +1461,16 @@ fn update_input(
         }
         #[cfg(target_arch = "wasm32")]
         if !sandbox.enabled {
+            // The 8-ball needs a called pocket; never let a forgotten call lose
+            // the game. Ask for it instead of shooting.
+            let missing_call = charged
+                && browser_transport::calling_eight()
+                && browser_transport::called_pocket().is_none();
+            if missing_call {
+                browser_transport::request_pocket_call();
+            }
             let shot_eligible = charged
+                && !missing_call
                 && input.preview_active
                 && !input.placement_sent_during_contact
                 && browser_transport::accepts_active_player_command()
@@ -1591,6 +1642,21 @@ fn publish_gesture(input: &mut PrototypeInput, cancel: bool) {
     }
 }
 
+/// Starts each turn with the cue where both players' screens put it, so the
+/// shooter and the opponent see the same cue before anyone touches it.
+#[cfg(target_arch = "wasm32")]
+fn apply_turn_start_aim(input: &mut PrototypeInput) {
+    let revision = browser_transport::authoritative_revision();
+    if revision.is_none() || revision == input.aim_revision || input.drag_origin.is_some() {
+        return;
+    }
+    input.aim_revision = revision;
+    if let Some(aim) = browser_transport::turn_start_aim() {
+        input.aim_angle = f32::from(aim.steps()) * std::f32::consts::TAU
+            / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN);
+    }
+}
+
 /// Shows the opponent where a tap pointed before the gesture's cancel. A tap
 /// is one deliberate change, so it bypasses the drag resend cadence.
 #[cfg(target_arch = "wasm32")]
@@ -1619,7 +1685,7 @@ fn publish_tap_aim(input: &mut PrototypeInput) {
 #[cfg(target_arch = "wasm32")]
 fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
     let shot = practice_shot(input);
-    let called_pocket = input.called_pocket.map_or(0, |pocket| match pocket {
+    let called_pocket = browser_transport::called_pocket().map_or(0, |pocket| match pocket {
         pwmtf_game_domain::PocketId::TopLeft => 1,
         pwmtf_game_domain::PocketId::TopCenter => 2,
         pwmtf_game_domain::PocketId::TopRight => 3,
@@ -2001,6 +2067,45 @@ mod tests {
                     "offset {offset:?} at {size:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tapping_a_drawn_pocket_selects_that_pocket() {
+        let geometry = pwmtf_game_domain::TableGeometry::standard();
+        let (hw, hh) = (
+            geometry.half_width().micros(),
+            geometry.half_height().micros(),
+        );
+        let canonical = [
+            (-hw, hh),
+            (0, hh),
+            (hw, hh),
+            (-hw, -hh),
+            (0, -hh),
+            (hw, -hh),
+        ];
+        for size in [
+            Vec2::new(1280.0, 634.0),
+            Vec2::new(844.0, 342.0),
+            Vec2::new(1600.0, 500.0),
+        ] {
+            let scale = (size / DESIGN_SIZE).min_element();
+            for (pocket, (x, y)) in POCKET_IDS.into_iter().zip(canonical) {
+                let world = canonical_to_world(pwmtf_game_domain::Vector::from_micros(x, y));
+                assert!(
+                    world.distance(pocket_world(pocket)) < 0.01,
+                    "{pocket:?} drawn where the rules put it"
+                );
+                // A finger slightly off-centre still selects it.
+                let screen = size / 2.0 + Vec2::new(world.x + 12.0, -world.y + 9.0) * scale;
+                assert_eq!(
+                    selected_pocket(screen, size),
+                    Some(pocket),
+                    "{pocket:?} at {size:?}"
+                );
+            }
+            assert_eq!(selected_pocket(size / 2.0, size), None);
         }
     }
 

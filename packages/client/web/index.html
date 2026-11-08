@@ -35,9 +35,11 @@
           <span class="spin-face"><i id="spin-button-dot"></i></span>
         </button>
         <div id="match-hud" role="status" aria-live="polite">
+          <span id="rack-self" class="rack" aria-label="Your balls" hidden></span>
           <span id="hud-players"></span>
           <span id="hud-turn"></span>
           <output id="turn-timer" aria-label="Turn time remaining" hidden></output>
+          <span id="rack-opponent" class="rack" aria-label="Opponent's balls" hidden></span>
         </div>
         <button id="open-play" class="pill-button" type="button" aria-controls="play-sheet" aria-expanded="false">
           <span id="open-play-label">Play friends</span>
@@ -184,6 +186,17 @@
               </select>
             </label>
             <label class="toggle"><input id="unlimited-aim-range" type="checkbox" /> <span>Unlimited guide length</span></label>
+          </section>
+
+          <section class="card">
+            <h3>How 8-ball works</h3>
+            <ul class="rules">
+              <li>After the break, the first ball you pocket without a foul makes you <strong>solids</strong> (1–7) or <strong>stripes</strong> (9–15). Your balls show on the left of the top bar, your opponent's on the right.</li>
+              <li>Pocketing one of your balls keeps your turn.</li>
+              <li>Once your balls are gone, pocket the <strong>8-ball</strong>. Tap the pocket you're aiming for first; the pockets light up to remind you.</li>
+              <li>Sinking the 8 early, in a different pocket, or with a foul loses the game.</li>
+              <li>A foul (scratch, hitting the wrong ball first, missing everything, or no ball reaching a rail) gives your opponent ball in hand.</li>
+            </ul>
           </section>
 
           <section class="card">

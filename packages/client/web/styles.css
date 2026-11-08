@@ -234,6 +234,56 @@ select:focus-visible,
   white-space: nowrap;
 }
 
+.rack {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.mini-ball {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--ball);
+  box-shadow: inset -2px -2px 3px rgb(0 0 0 / 35%);
+}
+
+.mini-ball.stripe {
+  background: linear-gradient(180deg, #f4efe2 0 26%, var(--ball) 26% 74%, #f4efe2 74%);
+}
+
+.mini-ball.pocketed {
+  opacity: 0.22;
+  transform: scale(0.8);
+}
+
+.mini-ball.eight {
+  width: 16px;
+  height: 16px;
+  background: radial-gradient(circle, #f4efe2 0 26%, #151515 30%);
+  box-shadow: 0 0 0 2px var(--gold), 0 0 8px var(--gold);
+  animation: eight-glow 1.4s ease-in-out infinite;
+}
+
+@keyframes eight-glow {
+  50% {
+    box-shadow: 0 0 0 2px var(--gold), 0 0 2px var(--gold);
+  }
+}
+
+.rules {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.rules strong {
+  color: var(--ink);
+}
+
 #hud-players {
   overflow: hidden;
   color: var(--muted);

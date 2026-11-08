@@ -271,6 +271,34 @@ pub fn remote_preview() -> Option<ShotPreview> {
     TRANSPORT.with(|transport| transport.borrow_mut().remote_preview(now))
 }
 
+/// Whether the local player must call a pocket for the 8-ball now.
+#[must_use]
+pub fn calling_eight() -> bool {
+    with(SessionTransport::calling_eight)
+}
+
+/// Records the local player's 8-ball call for this turn.
+pub fn set_called_pocket(pocket: pwmtf_game_domain::PocketId) {
+    with_mut(|transport| transport.set_called_pocket(pocket));
+}
+
+/// The local player's 8-ball call for this turn, if made.
+#[must_use]
+pub fn called_pocket() -> Option<pwmtf_game_domain::PocketId> {
+    with(SessionTransport::called_pocket)
+}
+
+/// Prompts the page to ask for a pocket call.
+pub fn request_pocket_call() {
+    with_mut(SessionTransport::request_pocket_call);
+}
+
+/// Where the cue starts this turn, identically on both screens.
+#[must_use]
+pub fn turn_start_aim() -> Option<pwmtf_game_domain::Aim> {
+    with(SessionTransport::turn_start_aim)
+}
+
 /// Returns where the opponent's cue belongs during their turn, if it is theirs.
 #[must_use]
 pub fn opponent_cue_target() -> Option<crate::transport::OpponentCueTarget> {
