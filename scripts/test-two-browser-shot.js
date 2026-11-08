@@ -382,7 +382,7 @@ try {
   const turnSteps = (from, to) => ((to - from) % 10000 + 15000) % 10000 - 5000;
   // The same counter-clockwise sweep turns the cue counter-clockwise whether
   // the finger is ahead of the ball or behind it on the cue.
-  for (const [label, offset, sweep] of [['ahead of', 200, -40], ['behind', -200, 40]]) {
+  for (const [label, offset, sweep] of [['ahead of', 200, -40], ['behind', -200, 40], ['off the table behind', -290, 40]]) {
     const before = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
     const grab = {x: focusOrigin.x + offset * focusScale, y: focusOrigin.y};
     await mouse(focusShooter, 'mouseMoved', grab.x, grab.y, 0);
@@ -754,7 +754,7 @@ try {
   for (const session of [shooter, opponent, focusShooter, focusOpponent, deadlineShooter, deadlineOpponent]) {
     if (textFrames(session).length) throw new Error('a session WebSocket carried a text frame');
   }
-  console.log('practice rotation behind the ball, tap-to-point, AIM roller, power-bar dead zone, touch/multitouch/tab-switch cancellation and local shot; match rotation ahead of and behind the ball, tap, roller, fixed-aim power planning and one authoritative bar-release shot, tab-switch interruption, power reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
+  console.log('practice rotation behind the ball, tap-to-point, AIM roller, power-bar dead zone, touch/multitouch/tab-switch cancellation and local shot; match rotation ahead of, behind, and off the table behind the ball, tap, roller, fixed-aim power planning and one authoritative bar-release shot, tab-switch interruption, power reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
 } catch (error) {
   console.error(`two-browser shot failed: ${error.stack ?? error}`);
   process.exitCode = 1;

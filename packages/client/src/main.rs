@@ -1049,13 +1049,6 @@ fn pointer_world(cursor: Vec2, size: Vec2) -> Vec2 {
     Vec2::new(cursor.x - size.x / 2.0, size.y / 2.0 - cursor.y) / scale
 }
 
-fn pointer_on_table(cursor: Vec2, size: Vec2) -> bool {
-    let position = pointer_world(cursor, size);
-    let half = TABLE_SIZE / 2.0;
-    let center = Vec2::new(TABLE_CENTER_X, 0.0);
-    position.is_finite() && (position - center).abs().cmple(half).all()
-}
-
 fn pointer_on_power_bar(cursor: Vec2, size: Vec2) -> bool {
     let position = pointer_world(cursor, size);
     position.is_finite()
@@ -1433,13 +1426,12 @@ fn update_input(
             input.pointer_contact,
             PointerContact::Aim | PointerContact::FineAim | PointerContact::Power
         ) {
-            let on_control = input.pointer_contact != PointerContact::Aim
-                || pointer_on_table(cursor, window_size);
+            // Rotation works at any distance from the cue ball, so an aim
+            // drag may start anywhere, including past the rails behind the cue.
             #[cfg(target_arch = "wasm32")]
-            let can_drag =
-                !input.placing_cue_ball && presentation.target.contains_key(&0) && on_control;
+            let can_drag = !input.placing_cue_ball && presentation.target.contains_key(&0);
             #[cfg(not(target_arch = "wasm32"))]
-            let can_drag = presentation.target.contains_key(&0) && on_control;
+            let can_drag = presentation.target.contains_key(&0);
             if can_drag {
                 let origin = pointer_world(cursor, window_size);
                 input.drag_origin = Some(origin);
@@ -1952,26 +1944,29 @@ mod tests {
     }
 
     #[test]
-    fn drag_can_start_anywhere_on_table_at_any_scale() {
-        for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
+    fn aim_drags_start_anywhere_off_the_controls() {
+        for size in [
+            Vec2::new(1280.0, 634.0),
+            Vec2::new(844.0, 325.0),
+            Vec2::new(1600.0, 500.0),
+        ] {
             let scale = (size / DESIGN_SIZE).min_element();
             let center = size / 2.0 + Vec2::new(TABLE_CENTER_X, 0.0) * scale;
             for offset in [
+                // On the felt, on the left rail behind a typical cue, and in
+                // the margin past the table's edges.
                 Vec2::ZERO,
-                Vec2::new(-TABLE_SIZE.x / 2.0 + 1.0, -TABLE_SIZE.y / 2.0 + 1.0),
-                Vec2::new(TABLE_SIZE.x / 2.0 - 1.0, TABLE_SIZE.y / 2.0 - 1.0),
-                Vec2::new(310.0, -120.0),
+                Vec2::new(-TABLE_SIZE.x / 2.0 - CUSHION / 2.0, 0.0),
+                Vec2::new(-TABLE_SIZE.x / 2.0 - CUSHION - 5.0, -60.0),
+                Vec2::new(0.0, TABLE_SIZE.y / 2.0 + CUSHION + 10.0),
             ] {
-                assert!(pointer_on_table(center + offset * scale, size));
+                let cursor = center + Vec2::new(offset.x, -offset.y) * scale;
+                assert_eq!(
+                    classify_pointer_contact(cursor, size),
+                    PointerContact::Aim,
+                    "offset {offset:?} at {size:?}"
+                );
             }
-            assert!(!pointer_on_table(
-                center + Vec2::new(481.0, 0.0) * scale,
-                size
-            ));
-            assert!(!pointer_on_table(
-                center + Vec2::new(0.0, 241.0) * scale,
-                size
-            ));
         }
     }
 
