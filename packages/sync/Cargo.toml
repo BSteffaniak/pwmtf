@@ -1,7 +1,7 @@
 [package]
 authors     = { workspace = true }
 categories  = ["game-development", "network-programming"]
-description = "Deterministic authoritative command-replay synchronization for turn-based physics games"
+description = "Deterministic authoritative synchronization: command replay for turn-based games and tick-stamped inputs with rollback for real-time games"
 edition     = { workspace = true }
 keywords    = ["deterministic", "game", "multiplayer", "netcode", "replay"]
 license     = { workspace = true }

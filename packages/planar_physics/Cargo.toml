@@ -1,0 +1,21 @@
+[package]
+authors     = { workspace = true }
+categories  = ["game-development", "simulation"]
+description = "Deterministic fixed-point planar physics for live table games"
+edition     = { workspace = true }
+keywords    = ["deterministic", "fixed-point", "game", "physics", "simulation"]
+license     = { workspace = true }
+name        = "pwmtf_planar_physics"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pwmtf_sync = { path = "../sync", version = "0.1.0" }
+
+[features]
+default          = []
+fail-on-warnings = []

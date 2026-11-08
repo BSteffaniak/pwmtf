@@ -5909,6 +5909,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwmtf_planar_physics"
+version = "0.1.0"
+dependencies = [
+ "pwmtf_sync",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "pwmtf_protocol"
 version = "0.1.0"
 dependencies = [

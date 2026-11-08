@@ -49,6 +49,17 @@ printf '%s\n' 'use pwmtf_eight_ball::MatchState;' > "$tmp/packages/sync/src/lib.
 assert_rejected "a specific game in sync"
 
 reset_fixture
+mkdir -p "$tmp/packages/planar_physics/src"
+printf '%s\n' '[package]' 'name = "pwmtf_planar_physics"' > "$tmp/packages/planar_physics/Cargo.toml"
+printf '%s\n' 'use bevy::prelude::*;' > "$tmp/packages/planar_physics/src/lib.rs"
+assert_rejected "Bevy in planar physics"
+
+reset_fixture
+mkdir -p "$tmp/packages/planar_physics/src"
+printf '%s\n' '[package]' 'name = "pwmtf_planar_physics"' '[dependencies]' 'tokio = { workspace = true }' > "$tmp/packages/planar_physics/Cargo.toml"
+assert_rejected "an async runtime in planar physics"
+
+reset_fixture
 mkdir -p "$tmp/packages/common/src"
 printf '%s\n' '[package]' 'name = "pwmtf_common"' > "$tmp/packages/common/Cargo.toml"
 assert_rejected "a generic package directory"

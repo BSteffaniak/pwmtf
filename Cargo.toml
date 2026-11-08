@@ -3,6 +3,7 @@ members = [
     "packages/billiards",
     "packages/client",
     "packages/eight_ball",
+    "packages/planar_physics",
     "packages/protocol",
     "packages/server",
     "packages/sync",
