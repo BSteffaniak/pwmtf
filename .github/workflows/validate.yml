@@ -18,11 +18,11 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
       - name: Install validation tools
-        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-deny,cargo-nextest@0.9.114,cargo-machete@0.8.0,wasm-bindgen-cli@0.2.127
       - name: Install operational self-test tools
@@ -61,7 +61,7 @@ jobs:
           PWMTF_TEST_ARTIFACT_DIR: ${{ runner.temp }}/wasm-concurrency
       - name: Upload WASM concurrency diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-concurrency-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/wasm-concurrency
@@ -87,9 +87,9 @@ jobs:
   configuration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Evaluate development shell
         run: nix flake check --no-build
