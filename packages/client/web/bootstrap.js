@@ -1053,9 +1053,12 @@ new MutationObserver(() => {
   if (socialStatus.textContent !== "") {
     toastTimer = window.setTimeout(() => {
       socialStatus.textContent = "";
-    }, 4_500);
+    }, 3_500);
   }
 }).observe(socialStatus, { childList: true, characterData: true, subtree: true });
+socialStatus.addEventListener("click", () => {
+  socialStatus.textContent = "";
+});
 
 // ---------- Social state ----------
 

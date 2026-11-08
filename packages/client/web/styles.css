@@ -857,21 +857,63 @@ input:user-invalid:not(:placeholder-shown) {
   color: var(--ink);
 }
 
+/* Messages appear in the top bar, in place of the status pill, so they never
+   cover the table. With a panel open, or on the portrait home screen, they
+   sit at the bottom instead. Tap to dismiss. */
 .toast {
   position: absolute;
   z-index: 9;
-  top: calc(var(--safe-top) + 56px);
+  top: calc(var(--safe-top) + 6px);
   left: 50%;
-  max-width: min(440px, calc(100% - 32px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  max-width: min(460px, calc(100% - 280px));
   margin: 0;
-  padding: 0.7rem 1rem;
-  border: 1px solid var(--line-strong);
-  border-radius: 12px;
+  padding: 0.2rem 1rem;
+  border: 1px solid rgb(240 205 115 / 45%);
+  border-radius: 20px;
   background: #1c2f28;
   box-shadow: var(--shadow);
+  font-size: 0.85rem;
+  line-height: 1.15;
   text-align: center;
   transform: translateX(-50%);
-  pointer-events: none;
+  cursor: pointer;
+  animation: toast-in 160ms ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+}
+
+#game-shell:has(.toast:not(:empty)) #match-hud {
+  visibility: hidden;
+}
+
+/* With a panel open, messages sit at the bottom of that panel. */
+#game-shell:has(#play-sheet:not([hidden])) .toast,
+#game-shell:has(#settings-sheet:not([hidden])) .toast {
+  top: auto;
+  bottom: calc(var(--safe-bottom) + 14px);
+  width: max-content;
+  /* The panel is min(380px, 70%) wide in short landscape; stay inside it. */
+  max-width: min(356px, calc(70% - 24px));
+  transform: none;
+  animation: none;
+}
+
+#game-shell:has(#play-sheet:not([hidden])) .toast {
+  right: calc(var(--safe-right) + 12px);
+  left: auto;
+}
+
+#game-shell:has(#settings-sheet:not([hidden])) .toast {
+  left: calc(var(--safe-left) + 12px);
 }
 
 .toast:empty {
@@ -1194,5 +1236,11 @@ input:user-invalid:not(:placeholder-shown) {
 
   .portrait-only {
     justify-self: center;
+  }
+
+  .toast {
+    top: auto;
+    bottom: calc(var(--safe-bottom) + 16px);
+    max-width: calc(100% - 32px);
   }
 }
