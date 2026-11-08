@@ -10,6 +10,7 @@ mod aim_preview;
 mod ball_art;
 mod cue_art;
 mod exact_preview;
+pub mod opponent_cue;
 pub mod playback;
 pub mod prediction;
 mod sandbox;
@@ -106,6 +107,13 @@ struct CanonicalPresentation {
 
 #[derive(Resource)]
 struct PresentationTier(&'static str);
+
+/// The opponent's smoothed cue this frame; `None` outside their turn.
+#[derive(Resource, Default)]
+struct OpponentCue {
+    motion: opponent_cue::OpponentCueMotion,
+    view: Option<opponent_cue::OpponentCueView>,
+}
 
 #[derive(Resource)]
 struct PrototypeInput {
@@ -496,6 +504,7 @@ fn main() {
         .init_resource::<CanonicalPresentation>()
         .init_resource::<exact_preview::ExactPreview>()
         .init_resource::<sandbox::Sandbox>()
+        .init_resource::<OpponentCue>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("Pool with More Than Friends · {presentation_tier} tier"),
@@ -521,6 +530,7 @@ fn main() {
                 rearm_input_after_valid_landscape,
                 update_sandbox,
                 update_input,
+                animate_opponent_cue,
                 aim_preview::draw,
                 update_aim,
                 #[cfg(target_arch = "wasm32")]
@@ -866,11 +876,36 @@ fn update_turn_status(
     }
 }
 
+/// Advances the opponent's cue spring once per frame.
+#[allow(clippy::needless_pass_by_value)]
+fn animate_opponent_cue(
+    time: Res<Time<Real>>,
+    sandbox: Res<sandbox::Sandbox>,
+    mut opponent: ResMut<OpponentCue>,
+) {
+    #[cfg(target_arch = "wasm32")]
+    let target = if sandbox.enabled {
+        None
+    } else {
+        browser_transport::opponent_cue_target()
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let target = {
+        let _ = &sandbox;
+        None
+    };
+    let seconds = time.delta_secs();
+    opponent.view = opponent.motion.update(target, seconds);
+    #[cfg(target_arch = "wasm32")]
+    RENDERED_OPPONENT_CUE.set(opponent.view.map(|view| (view.aim, view.power)));
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn update_match_control_visibility(
     sandbox: Res<sandbox::Sandbox>,
     presentation: Res<CanonicalPresentation>,
     mut controls: Query<&mut Visibility, With<MatchControlChrome>>,
+    opponent: Res<OpponentCue>,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     if !presentation.is_changed() {
@@ -883,17 +918,9 @@ fn update_match_control_visibility(
         (sandbox.enabled && !sandbox.moving) || browser_transport::accepts_active_player_command();
     #[cfg(not(target_arch = "wasm32"))]
     let local_may_act = sandbox.enabled && !sandbox.moving;
-    let remote_visible = {
-        #[cfg(target_arch = "wasm32")]
-        {
-            browser_transport::remote_preview().is_some()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            false
-        }
-    };
-    let visibility = if local_may_act || remote_visible {
+    // The opponent's cue stays visible for their whole turn, not only while
+    // their finger is moving.
+    let visibility = if local_may_act || opponent.view.is_some() {
         Visibility::Inherited
     } else {
         Visibility::Hidden
@@ -959,6 +986,23 @@ pub fn match_ball_position(ball: u8) -> Option<Vec<f64>> {
             .flatten()
             .map(|position| vec![f64::from(position.x), f64::from(position.y)])
     })
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static RENDERED_OPPONENT_CUE: std::cell::Cell<Option<(f32, f32)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns the opponent's rendered cue as `[aim_radians, power]` (debug/test
+/// getter), or `undefined` when it is not shown.
+#[must_use]
+pub fn match_opponent_cue() -> Option<Vec<f64>> {
+    RENDERED_OPPONENT_CUE
+        .get()
+        .map(|(aim, power)| vec![f64::from(aim), f64::from(power)])
 }
 
 fn spawn_pocket_art(
@@ -1613,28 +1657,18 @@ fn update_aim(
         (With<PowerFill>, Without<Cue>, Without<FineAimRidge>),
     >,
     mut ridges: Query<(&FineAimRidge, &mut Transform), (Without<Cue>, Without<PowerFill>)>,
+    opponent: Res<OpponentCue>,
 ) {
     let cue_ball = presentation
         .target
         .get(&0)
         .copied()
         .unwrap_or(Vec2::new(-330.0, 0.0));
-    #[cfg(target_arch = "wasm32")]
-    let remote = if !browser_transport::accepts_active_player_command() {
-        browser_transport::remote_preview()
-    } else {
-        None
-    };
-    #[cfg(target_arch = "wasm32")]
-    let (angle, strength) = remote.map_or((input.aim_angle, input.power), |preview| {
-        (
-            f32::from(preview.aim.steps()) * std::f32::consts::TAU
-                / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN),
-            f32::from(preview.power.units()) / f32::from(pwmtf_game_domain::ShotPower::MAX),
-        )
-    });
-    #[cfg(not(target_arch = "wasm32"))]
-    let (angle, strength) = (input.aim_angle, input.power);
+    let (angle, strength) = opponent
+        .view
+        .map_or((input.aim_angle, input.power), |view| {
+            (view.aim, view.power)
+        });
     **cue = cue_transform(cue_ball, angle, strength);
 
     let fill_height = POWER_BAR_HEIGHT * strength;

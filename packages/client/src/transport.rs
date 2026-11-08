@@ -92,9 +92,23 @@ struct PendingCommand {
     resend_on_state: bool,
 }
 
+/// Where the opponent's cue should be while they plan a shot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpponentCueTarget {
+    /// Their latest aim this turn, if any has arrived.
+    pub aim: Option<pwmtf_game_domain::Aim>,
+    /// Drawn-back power; zero when they are not charging.
+    pub power: pwmtf_game_domain::ShotPower,
+    /// Cue-ball contact point for the guide.
+    pub spin: pwmtf_game_domain::Spin,
+}
+
 #[derive(Debug, Default)]
 struct PreviewState {
     remote: Option<(ShotPreview, f64)>,
+    /// Latest accepted non-cancel preview: the opponent's resting aim after
+    /// they pause or release, until the revision changes.
+    resting: Option<ShotPreview>,
     last_received_sequence: Option<(u64, u32)>,
     remote_last: Option<(u64, u64, u32, bool)>,
     last_sent: Option<f64>,
@@ -106,6 +120,7 @@ struct PreviewState {
 impl PreviewState {
     const fn clear_remote(&mut self) {
         self.remote = None;
+        self.resting = None;
         self.remote_last = None;
         self.last_received_sequence = None;
     }
@@ -641,6 +656,9 @@ impl SessionTransport {
             preview.cancel,
         ));
         state.remote = Some((preview, now));
+        if !preview.cancel {
+            state.resting = Some(preview);
+        }
     }
 
     fn remote_preview_eligible(&self, preview: &ShotPreview) -> bool {
@@ -1004,6 +1022,49 @@ impl SessionTransport {
         self.previews
             .remote
             .and_then(|(value, _)| (!value.cancel).then_some(value))
+    }
+
+    /// Returns where the opponent's cue belongs during their turn: their live
+    /// planning when it is fresh, otherwise resting at their last aim with no
+    /// power. `None` outside the opponent's turn, so the cue is never shown
+    /// for a player who cannot act.
+    pub fn opponent_cue_target(&mut self, now: f64) -> Option<OpponentCueTarget> {
+        let revision = self.opponent_turn_revision()?;
+        if let Some(live) = self.remote_preview(now) {
+            return Some(OpponentCueTarget {
+                aim: Some(live.aim),
+                power: live.power,
+                spin: live.spin,
+            });
+        }
+        let resting = self
+            .previews
+            .resting
+            .filter(|preview| preview.revision == revision);
+        Some(OpponentCueTarget {
+            aim: resting.map(|preview| preview.aim),
+            power: pwmtf_game_domain::ShotPower::new(0).ok()?,
+            spin: resting.map_or(pwmtf_game_domain::Spin::CENTER, |preview| preview.spin),
+        })
+    }
+
+    /// The authoritative revision while the opponent may act and this client
+    /// is connected, idle, and not replaying a shot.
+    fn opponent_turn_revision(&self) -> Option<u64> {
+        let session = self.session.as_ref()?;
+        if self.status != ConnectionStatus::Ready
+            || session.pending.is_some()
+            || session.playback.is_some()
+        {
+            return None;
+        }
+        let prediction = session.prediction.as_ref()?;
+        let state = prediction.authoritative();
+        (matches!(state.status(), MatchStatus::InProgress)
+            && session
+                .seat
+                .is_some_and(|seat| seat != state.active_player()))
+        .then(|| prediction.authoritative_revision())
     }
 
     // ----- queries ---------------------------------------------------------
@@ -2069,6 +2130,47 @@ mod tests {
         let mut shooter = ready(Player::One, &state, 0);
         receive(&mut shooter, preview(0, 1, false), 100.0);
         assert_eq!(shooter.remote_preview(100.0), None);
+    }
+
+    #[test]
+    fn opponent_cue_stays_for_their_whole_turn() {
+        let state = initial_state();
+        let mut observer = ready(Player::Two, &state, 0);
+        let receive = |transport: &mut SessionTransport, value: ShotPreview, now: f64| {
+            transport.receive(
+                &frame(&ServerMessage::Preview {
+                    match_id: MATCH,
+                    preview: value,
+                }),
+                now,
+            );
+        };
+        // Visible before the opponent has aimed at all.
+        let idle = observer.opponent_cue_target(100.0).unwrap();
+        assert_eq!(idle.aim, None);
+        assert_eq!(idle.power.units(), 0);
+        // A live preview drives it.
+        let mut charged = preview(0, 1, false);
+        charged.power = pwmtf_game_domain::ShotPower::new(4_000).unwrap();
+        receive(&mut observer, charged, 110.0);
+        let live = observer.opponent_cue_target(120.0).unwrap();
+        assert_eq!(live.aim, Some(charged.aim));
+        assert_eq!(live.power.units(), 4_000);
+        // After expiry, and after a release cancel, it rests at the last aim
+        // with no power instead of disappearing.
+        let expired = observer
+            .opponent_cue_target(110.0 + REMOTE_PREVIEW_EXPIRY_MS + 1.0)
+            .unwrap();
+        assert_eq!((expired.aim, expired.power.units()), (Some(charged.aim), 0));
+        receive(&mut observer, preview(0, 2, true), 900.0);
+        let released = observer.opponent_cue_target(910.0).unwrap();
+        assert_eq!(
+            (released.aim, released.power.units()),
+            (Some(charged.aim), 0)
+        );
+        // Never shown to the player whose turn it is.
+        let mut shooter = ready(Player::One, &state, 0);
+        assert_eq!(shooter.opponent_cue_target(100.0), None);
     }
 
     #[test]

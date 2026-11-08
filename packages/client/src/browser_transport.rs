@@ -271,6 +271,13 @@ pub fn remote_preview() -> Option<ShotPreview> {
     TRANSPORT.with(|transport| transport.borrow_mut().remote_preview(now))
 }
 
+/// Returns where the opponent's cue belongs during their turn, if it is theirs.
+#[must_use]
+pub fn opponent_cue_target() -> Option<crate::transport::OpponentCueTarget> {
+    let now = monotonic_millis();
+    TRANSPORT.with(|transport| transport.borrow_mut().opponent_cue_target(now))
+}
+
 /// Sends one locally quantized, non-authoritative planning update.
 ///
 /// # Errors

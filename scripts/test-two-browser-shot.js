@@ -396,6 +396,45 @@ try {
     await mouse(focusShooter, 'mouseReleased', grab.x, grab.y + sweep * focusScale, 0);
     await until(`releasing a drag ${label} the ball cancels planning`, () => aimPreviews(before).some(value => value.cancel === 1));
   }
+  // The opponent's cue eases between planning updates instead of stepping,
+  // and stays visible, at rest, after the gesture ends.
+  const opponentModule = `const moduleUrl = performance.getEntriesByType('resource').map(entry => entry.name)
+      .find(name => new URL(name).pathname === '/pwmtf_client.js');
+    const module = await import(moduleUrl);`;
+  await evaluate(focusOpponent, `(async () => {
+    ${opponentModule}
+    window.__pwmtfCueSamples = [];
+    window.__pwmtfCueSampler = setInterval(() => {
+      const cue = module.match_opponent_cue();
+      window.__pwmtfCueSamples.push(cue === undefined || cue === null ? null : Array.from(cue));
+    }, 10);
+    return true;
+  })()`);
+  const sweepBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+  const sweepGrab = {x: focusOrigin.x + 220 * focusScale, y: focusOrigin.y};
+  await mouse(focusShooter, 'mouseMoved', sweepGrab.x, sweepGrab.y, 0);
+  await mouse(focusShooter, 'mousePressed', sweepGrab.x, sweepGrab.y, 1);
+  for (let step = 1; step <= 6; step += 1) {
+    await sleep(70);
+    await mouse(focusShooter, 'mouseMoved', sweepGrab.x, sweepGrab.y - step * 18 * focusScale, 1);
+  }
+  await sleep(400);
+  await mouse(focusShooter, 'mouseReleased', sweepGrab.x, sweepGrab.y - 108 * focusScale, 0);
+  // Wait past the live-preview expiry; the cue must remain, drawn back.
+  await sleep(1200);
+  const cueSamples = JSON.parse(await evaluate(focusOpponent, 'clearInterval(window.__pwmtfCueSampler), JSON.stringify(window.__pwmtfCueSamples)'));
+  const sweepAims = new Set(aimPreviews(sweepBefore).filter(value => !value.cancel).map(value => value.aim));
+  const renderedAims = new Set(cueSamples.filter(Boolean).map(([aim]) => aim.toFixed(4)));
+  if (cueSamples.some(sample => sample === null)) {
+    throw new Error('the opponent cue disappeared during or after the gesture');
+  }
+  if (sweepAims.size < 2 || renderedAims.size < sweepAims.size * 2) {
+    throw new Error(`opponent cue stepped instead of easing: ${renderedAims.size} rendered headings for ${sweepAims.size} updates`);
+  }
+  const restingCue = cueSamples.at(-1);
+  if (Math.abs(restingCue[1]) > 0.01) {
+    throw new Error(`opponent cue did not come to rest after release: ${JSON.stringify(restingCue)}`);
+  }
   // A quick tap left of the cue ball points the cue straight left.
   const tapBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
   const leftOfCue = {x: focusOrigin.x - 150 * focusScale, y: focusOrigin.y};
@@ -754,7 +793,7 @@ try {
   for (const session of [shooter, opponent, focusShooter, focusOpponent, deadlineShooter, deadlineOpponent]) {
     if (textFrames(session).length) throw new Error('a session WebSocket carried a text frame');
   }
-  console.log('practice rotation behind the ball, tap-to-point, AIM roller, power-bar dead zone, touch/multitouch/tab-switch cancellation and local shot; match rotation ahead of, behind, and off the table behind the ball, tap, roller, fixed-aim power planning and one authoritative bar-release shot, tab-switch interruption, power reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
+  console.log('practice rotation behind the ball, tap-to-point, AIM roller, power-bar dead zone, touch/multitouch/tab-switch cancellation and local shot; match rotation ahead of, behind, and off the table behind the ball, smooth always-visible opponent cue, tap, roller, fixed-aim power planning and one authoritative bar-release shot, tab-switch interruption, power reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
 } catch (error) {
   console.error(`two-browser shot failed: ${error.stack ?? error}`);
   process.exitCode = 1;

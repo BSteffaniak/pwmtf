@@ -92,42 +92,36 @@ const fn power_stroke_length(power: f32, clearance: f32) -> f32 {
         .min(GUIDE_LENGTH)
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::option_if_let_else
+)]
 pub fn draw(
     mut gizmos: Gizmos,
     presentation: Res<CanonicalPresentation>,
     input: Res<PrototypeInput>,
     sandbox: Res<Sandbox>,
     mut exact: ResMut<crate::exact_preview::ExactPreview>,
+    opponent: Res<crate::OpponentCue>,
 ) {
-    #[cfg(target_arch = "wasm32")]
-    let remote = if !sandbox.enabled {
-        crate::browser_transport::remote_preview()
-    } else {
-        None
-    };
-    #[cfg(target_arch = "wasm32")]
+    // The opponent's smoothed cue, so the guide moves with it.
+    let remote = opponent.view;
     let mut preview_input = crate::PrototypeInput::default();
-    #[cfg(target_arch = "wasm32")]
-    let input = if let Some(preview) = remote {
-        preview_input.aim_angle = f32::from(preview.aim.steps()) * std::f32::consts::TAU
-            / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN);
-        preview_input.power =
-            f32::from(preview.power.units()) / f32::from(pwmtf_game_domain::ShotPower::MAX);
-        preview_input.spin = Vec2::new(
-            f32::from(preview.spin.side) / 10_000.0,
-            f32::from(preview.spin.vertical) / 10_000.0,
-        );
+    let input = if let Some(view) = remote {
+        preview_input.aim_angle = view.aim;
+        preview_input.power = view.power;
+        #[cfg(target_arch = "wasm32")]
+        {
+            preview_input.spin = Vec2::new(view.spin.0, view.spin.1);
+        }
         &preview_input
     } else {
         &*input
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    let input = &*input;
-    let enabled = sandbox.enabled && !sandbox.moving;
+    let enabled = (sandbox.enabled && !sandbox.moving) || remote.is_some();
     #[cfg(target_arch = "wasm32")]
-    let enabled =
-        enabled || crate::browser_transport::accepts_active_player_command() || remote.is_some();
+    let enabled = enabled || crate::browser_transport::accepts_active_player_command();
     if !enabled {
         return;
     }
