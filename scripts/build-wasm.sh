@@ -82,6 +82,46 @@ from pathlib import Path
 
 path = Path("dist/bootstrap.js")
 contents = path.read_text(encoding="utf-8")
+
+# Version every asset reference with the build ID. The edge may cache CSS,
+# JS and WASM for hours even though the origin says no-cache, so a new
+# no-cache index.html must never load a previous deploy's assets.
+version = os.environ["BUILD_ID"]
+
+
+def stamp(text, references, label):
+    for old, new in references:
+        if text.count(old) != 1:
+            raise SystemExit(f"{label} reference must occur exactly once: {old}")
+        text = text.replace(old, new)
+    return text
+
+
+index_path = Path("dist/index.html")
+index_path.write_text(
+    stamp(
+        index_path.read_text(encoding="utf-8"),
+        (
+            ('src="/install.js"', f'src="/install.js?v={version}"'),
+            ('href="./styles.css"', f'href="./styles.css?v={version}"'),
+            ('src="./bootstrap.js"', f'src="./bootstrap.js?v={version}"'),
+        ),
+        "index.html",
+    ),
+    encoding="utf-8",
+)
+contents = stamp(
+    contents,
+    (
+        ('import("./feasibility.js")', f'import("./feasibility.js?v={version}")'),
+        ('import("./pwmtf_client.js")', f'import("./pwmtf_client.js?v={version}")'),
+        (
+            "module.default()",
+            f'module.default({{ module_or_path: "./pwmtf_client_bg.wasm?v={version}" }})',
+        ),
+    ),
+    "bootstrap.js",
+)
 bundle_hash = hashlib.sha256()
 assets = sorted(
     (

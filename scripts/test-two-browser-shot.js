@@ -729,7 +729,13 @@ try {
   // replayed tick-by-tick from the authoritative table, so mid-shot positions
   // must differ from both the starting rack and the settled table.
   await evaluate(opponent, `(async () => {
-    const module = await import('/pwmtf_client.js');
+    // Import the exact versioned URL the page loaded so this shares its
+    // initialized module instance instead of creating an uninitialized copy.
+    const moduleUrl = performance.getEntriesByType('resource')
+      .map(entry => entry.name)
+      .find(name => new URL(name).pathname === '/pwmtf_client.js');
+    if (!moduleUrl) throw new Error('page did not load pwmtf_client.js');
+    const module = await import(moduleUrl);
     if (typeof module.match_ball_position !== 'function') throw new Error('match_ball_position debug export is missing');
     const status = document.querySelector('#match-status');
     window.__pwmtfSamples = [];
