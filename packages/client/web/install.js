@@ -42,3 +42,8 @@ window.addEventListener('appinstalled', () => {
 });
 standalone.addEventListener('change', refresh);
 refresh();
+// The table is landscape-only. The manifest asks installed apps to launch in
+// landscape; where the browser also allows a runtime lock, hold it there.
+if (standalone.matches || navigator.standalone === true) {
+  window.screen?.orientation?.lock?.('landscape')?.catch(() => {});
+}
