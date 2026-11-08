@@ -5908,6 +5908,7 @@ dependencies = [
 name = "pwmtf_server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "futures-lite",
  "futures-util",

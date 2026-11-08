@@ -29,13 +29,15 @@ async fn run() -> Result<(), StartupError> {
         configuration.expected_build_id.as_deref(),
         configuration.expected_source_hash.as_deref(),
     )?;
-    let db: Arc<dyn switchy_database::Database> = switchy_database_connection::builder()
+    let backend: Arc<dyn switchy_database::Database> = switchy_database_connection::builder()
         .turso()
         .with_path(&configuration.database_path)
         .with_busy_timeout(Duration::from_secs(5))
         .build()
         .await?
         .into();
+    let db: Arc<dyn switchy_database::Database> =
+        Arc::new(pwmtf_server::SerializedDatabase::new(backend));
     migrate(&*db).await?;
     let state = if configuration.development_mode {
         #[cfg(feature = "insecure")]

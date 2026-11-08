@@ -23,6 +23,7 @@ mod profile_store;
 mod projection_store;
 mod realtime;
 mod rematch_store;
+mod serialized_database;
 mod session_store;
 mod social;
 mod social_store;
@@ -66,6 +67,7 @@ pub use realtime::{
 pub use rematch_store::{
     PendingRematch, RematchStoreError, accept_rematch, offer_rematch, pending_rematches_for,
 };
+pub use serialized_database::SerializedDatabase;
 pub use session_store::{
     SessionStoreError, cleanup_expired_sessions, create_session as create_stored_session,
     insert_session, resolve_session as resolve_stored_session,

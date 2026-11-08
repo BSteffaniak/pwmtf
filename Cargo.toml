@@ -16,6 +16,7 @@ repository = "https://github.com/BSteffaniak/pool-with-friends"
 version    = "0.1.0"
 
 [workspace.dependencies]
+async-trait = { version = "0.1.92", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = [
     "http1",
     "json",

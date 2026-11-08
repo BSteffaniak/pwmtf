@@ -120,6 +120,9 @@ pub async fn resolve_session(
     unreachable!("bounded retry loop returns on its final attempt")
 }
 
+/// Largest "last used in the future" gap explained by concurrent requests.
+const CONCURRENT_USE_SKEW_MS: i64 = 60_000;
+
 async fn resolve_session_once(
     db: &dyn Database,
     token_hash: SessionTokenHash,
@@ -147,10 +150,14 @@ async fn resolve_session_once(
         .get("last_used_at_ms")
         .and_then(|value| value.as_i64())
         .ok_or(SessionStoreError::Malformed)?;
+    // Concurrent requests on one session sample `now` before this lookup, so
+    // another may already have recorded a slightly later use. Tolerate that
+    // skew without moving the record backwards; a larger regression is corrupt.
     let now = to_i64(now)?;
-    if expires_at <= last_used_at || now < last_used_at {
+    if expires_at <= last_used_at || now.saturating_add(CONCURRENT_USE_SKEW_MS) < last_used_at {
         return Err(SessionStoreError::Malformed);
     }
+    let now = now.max(last_used_at);
     if expires_at <= now {
         tx.delete("sessions")
             .where_eq("session_hash", encoded_hash)
@@ -530,8 +537,8 @@ mod tests {
             db.insert("sessions")
                 .value("session_hash", encode_hash(SessionTokenHash::new([2; 32])))
                 .value("account_id", "42")
-                .value("expires_at_ms", 200_i64)
-                .value("last_used_at_ms", 100_i64)
+                .value("expires_at_ms", 200_000_i64)
+                .value("last_used_at_ms", 100_000_i64)
                 .execute(&*db)
                 .await
                 .unwrap();
@@ -539,6 +546,14 @@ mod tests {
                 resolve_session(&*db, SessionTokenHash::new([2; 32]), 50).await,
                 Err(SessionStoreError::Malformed)
             ));
+            // A concurrent request that sampled `now` just before another
+            // request recorded its use still resolves, without regressing it.
+            assert_eq!(
+                resolve_session(&*db, SessionTokenHash::new([2; 32]), 99_000)
+                    .await
+                    .unwrap(),
+                Some(AccountId::new(42))
+            );
             revoke_session(&*db, SessionTokenHash::new([2; 32]))
                 .await
                 .unwrap();
