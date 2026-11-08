@@ -24,7 +24,7 @@
   <body>
     <main id="game-shell" aria-label="Pool with More Than Friends" data-client-state="loading">
       <div id="table-stage">
-        <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Touch a point to aim from the cue ball toward it; drag to refine. Drag the POWER bar down and release to shoot."></canvas>
+        <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Drag anywhere to rotate the cue, tap a spot to point at it, use the AIM roller to fine-tune, and drag the POWER bar down and release to shoot."></canvas>
       </div>
 
       <header id="hud">
@@ -45,7 +45,7 @@
         </button>
       </header>
       <output id="match-status" aria-hidden="true"></output>
-      <footer id="game-help">Touch a direction on the table to aim · Drag POWER down and release to shoot</footer>
+      <footer id="game-help">Drag anywhere to rotate the cue · Tap to point · Drag POWER down and release to shoot</footer>
 
       <section id="spin-popover" aria-label="Cue spin" hidden>
         <div id="spin-pad" role="slider" tabindex="0" aria-label="Cue ball contact point" aria-valuetext="Center hit">
@@ -175,13 +175,7 @@
 
           <section class="card">
             <h3>Controls</h3>
-            <label class="field" id="shot-control-mode-control">Shooting
-              <select id="shot-control-mode" aria-label="Shot control mode">
-                <option value="1" selected>Aim on table + power bar</option>
-                <option value="0">Pull back to aim and shoot</option>
-              </select>
-            </label>
-            <p id="shot-control-instructions" class="help"></p>
+            <p class="help">Drag anywhere on the table to rotate the cue around the ball, even behind it, so your finger never covers the line. Farther from the ball turns more finely. Tap a spot to point straight at it, slide the AIM roller for tiny adjustments, then drag POWER down and release to shoot.</p>
             <label class="field" id="aim-mode-control">Aim guide
               <select id="aim-mode" aria-label="Aim guide mode">
                 <option value="1">Short (physics-accurate)</option>

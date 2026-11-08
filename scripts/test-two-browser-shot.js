@@ -91,9 +91,6 @@ async function page(cookie, matchId = seed.live_match_id) {
   await send('Network.setCookie', {name: 'pwmtf_dev_session', value: token, url: base, httpOnly: true, sameSite: 'Lax'}, sessionId);
   await send('Page.navigate', {url: `${base}/?match=${matchId}`}, sessionId);
   await until('match ready', () => evaluate(sessionId, 'document.querySelector("#game-shell")?.dataset.clientState === "ready" && document.querySelector("#match-status")?.textContent.includes("Connected")'), 60000);
-  if (await evaluate(sessionId, 'document.querySelector("#shot-control-mode")?.value') !== '1') {
-    throw new Error('new match context did not use default aim + power bar');
-  }
   return {sessionId, targetId, browserContextId};
 }
 async function practicePage() {
@@ -105,9 +102,6 @@ async function practicePage() {
   await send('Page.navigate', {url: `${base}/`}, sessionId);
   await until('practice ready', () => evaluate(sessionId,
     'document.querySelector("#game-shell")?.dataset.clientState === "ready"'), 60000);
-  if (await evaluate(sessionId, 'document.querySelector("#shot-control-mode")?.value') !== '1') {
-    throw new Error('new practice context did not use default aim + power bar');
-  }
   return {sessionId, targetId, browserContextId};
 }
 async function strangerPage() {
@@ -210,32 +204,23 @@ try {
   const practiceOrigin = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 - 295 * practiceScale,
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await sleep(300);
-  // The default is aim + power bar; the legacy gesture remains selectable.
-  if (await evaluate(practiceSession, 'document.querySelector("#shot-control-mode").value') !== '1') {
-    throw new Error('aim + power bar is not the default shot control');
-  }
+  // Presentation preferences are device-local and restore before ready.
   await evaluate(practiceSession, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '0';
-    control.dispatchEvent(new Event('change', {bubbles: true}));
-  })()`);
-  await evaluate(practiceSession, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '1';
-    control.dispatchEvent(new Event('change', {bubbles: true}));
     const guide = document.querySelector('#aim-mode');
     guide.value = '2'; guide.dispatchEvent(new Event('change', {bubbles: true}));
     const range = document.querySelector('#unlimited-aim-range');
     range.checked = true; range.dispatchEvent(new Event('change', {bubbles: true}));
   })()`);
   const savedPreferences = await evaluate(practiceSession, `JSON.parse(localStorage.getItem('pwmtf.presentation.v1'))`);
-  if (savedPreferences.version !== 1 || savedPreferences.shotControl !== 1 || savedPreferences.aimGuide !== 2 || savedPreferences.unlimitedRange !== true) {
+  if (savedPreferences.version !== 1 || savedPreferences.aimGuide !== 2 || savedPreferences.unlimitedRange !== true) {
     throw new Error('presentation preferences did not save valid selections');
+  }
+  if (await evaluate(practiceSession, 'document.querySelector("#shot-control-mode") !== null')) {
+    throw new Error('the retired shot-control setting is still present');
   }
   await send('Page.reload', {ignoreCache: true}, practiceSession);
   await until('saved preferences restore before practice is ready', () => evaluate(practiceSession,
     `document.querySelector('#game-shell')?.dataset.clientState === 'ready' &&
-    document.querySelector('#shot-control-mode')?.value === '1' &&
     document.querySelector('#aim-mode')?.value === '2' &&
     document.querySelector('#unlimited-aim-range')?.checked === true`), 60000);
   await evaluate(practiceSession, `(() => {
@@ -244,14 +229,42 @@ try {
     const range = document.querySelector('#unlimited-aim-range');
     range.checked = false; range.dispatchEvent(new Event('change', {bubbles: true}));
   })()`);
-  // Exercise separate controls without firing or changing the practice rack.
+  const stillAfter = async (label) => {
+    await sleep(350);
+    const settled = await imageHash(practiceSession);
+    await sleep(250);
+    if (await imageHash(practiceSession) !== settled) throw new Error(`${label} fired a practice shot`);
+    return settled;
+  };
+  // One aiming model. Dragging behind the ball, on the cue, rotates it.
   const practiceIdle = await imageHash(practiceSession);
-  const alternateOrigin = {x: practiceOrigin.x - 110 * practiceScale, y: practiceOrigin.y};
-  await mouse(practiceSession, 'mouseMoved', alternateOrigin.x, alternateOrigin.y, 0);
-  await mouse(practiceSession, 'mousePressed', alternateOrigin.x, alternateOrigin.y, 1);
-  await until('separate aim contact left of cue changes cue immediately', async () => (await imageHash(practiceSession)) !== practiceIdle);
-  await mouse(practiceSession, 'mouseMoved', alternateOrigin.x + 25 * practiceScale, alternateOrigin.y, 1);
-  await mouse(practiceSession, 'mouseReleased', alternateOrigin.x + 25 * practiceScale, alternateOrigin.y, 0);
+  const behindCue = {x: practiceOrigin.x - 200 * practiceScale, y: practiceOrigin.y};
+  await mouse(practiceSession, 'mouseMoved', behindCue.x, behindCue.y, 0);
+  await mouse(practiceSession, 'mousePressed', behindCue.x, behindCue.y, 1);
+  await sleep(120);
+  await mouse(practiceSession, 'mouseMoved', behindCue.x, behindCue.y + 60 * practiceScale, 1);
+  await until('dragging behind the ball rotates the cue', async () => (await imageHash(practiceSession)) !== practiceIdle);
+  await mouse(practiceSession, 'mouseReleased', behindCue.x, behindCue.y + 60 * practiceScale, 0);
+  const afterRotation = await stillAfter('a table rotation drag');
+  // A quick tap points the cue at the tapped spot.
+  const tapSpot = {x: practiceOrigin.x, y: practiceOrigin.y - 150 * practiceScale};
+  await mouse(practiceSession, 'mouseMoved', tapSpot.x, tapSpot.y, 0);
+  await mouse(practiceSession, 'mousePressed', tapSpot.x, tapSpot.y, 1);
+  await sleep(150);
+  await mouse(practiceSession, 'mouseReleased', tapSpot.x, tapSpot.y, 0);
+  await until('a tap points the cue', async () => (await imageHash(practiceSession)) !== afterRotation);
+  const afterTap = await stillAfter('a tap');
+  // The AIM roller makes small turns.
+  const roller = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 + 500 * practiceScale,
+    y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
+  await mouse(practiceSession, 'mouseMoved', roller.x, roller.y, 0);
+  await mouse(practiceSession, 'mousePressed', roller.x, roller.y, 1);
+  await sleep(120);
+  await mouse(practiceSession, 'mouseMoved', roller.x, roller.y - 80 * practiceScale, 1);
+  await until('the AIM roller turns the cue', async () => (await imageHash(practiceSession)) !== afterTap);
+  await mouse(practiceSession, 'mouseReleased', roller.x, roller.y - 80 * practiceScale, 0);
+  await stillAfter('an AIM roller drag');
+  // POWER bar: charging changes the cue; returning to zero before release does not shoot.
   const bar = {x: practiceCanvasRect.x + practiceCanvasRect.width / 2 + 565 * practiceScale,
     y: practiceCanvasRect.y + practiceCanvasRect.height / 2};
   await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 0);
@@ -259,104 +272,42 @@ try {
   await sleep(120);
   const beforeBarDrag = await imageHash(practiceSession);
   await mouse(practiceSession, 'mouseMoved', bar.x, bar.y + 100 * practiceScale, 1);
-  await until('separate power-bar drag changes cue and guide', async () => (await imageHash(practiceSession)) !== beforeBarDrag);
+  await until('power-bar drag changes cue and guide', async () => (await imageHash(practiceSession)) !== beforeBarDrag);
   await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 1);
   await mouse(practiceSession, 'mouseReleased', bar.x, bar.y, 0);
+  await stillAfter('an uncharged power-bar release');
   await touch(practiceSession, 'touchStart', [[19, bar.x, bar.y]]);
   await sleep(120);
   await touch(practiceSession, 'touchMove', [[19, bar.x, bar.y + 110 * practiceScale]]);
   await sleep(180);
   await touch(practiceSession, 'touchCancel', []);
-  await sleep(200);
-  const touchBarCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== touchBarCanceled) throw new Error('separate touch cancel fired a practice shot');
-  // Combined drag remains available; the mode change is stored on this device.
-  await evaluate(practiceSession, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '0';
-    control.dispatchEvent(new Event('change', {bubbles: true}));
-  })()`);
-  await sleep(250);
-  const combinedIdle = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== combinedIdle) throw new Error('separate aim or uncharged power release fired');
   // A canceled touch blocks rearming until a fresh released contact.
+  const touchBarCanceled = await stillAfter('a canceled power-bar touch');
   await touch(practiceSession, 'touchStart', [[20, bar.x, bar.y]]);
   await touch(practiceSession, 'touchEnd', []);
   await sleep(120);
-  // The gesture begins well away from the cue ball, near the right rail.
-  const practiceDragStart = {x: practiceOrigin.x + 560 * practiceScale, y: practiceOrigin.y - 100 * practiceScale};
-  await mouse(practiceSession, 'mouseMoved', practiceDragStart.x, practiceDragStart.y, 0);
-  await mouse(practiceSession, 'mousePressed', practiceDragStart.x, practiceDragStart.y, 1);
+  await touch(practiceSession, 'touchStart', [[3, bar.x, bar.y]]);
   await sleep(120);
-  await mouse(practiceSession, 'mouseMoved', practiceDragStart.x - 90, practiceDragStart.y, 1);
-  await until('practice remote-start drag changes local canvas', async () => (await imageHash(practiceSession)) !== practiceIdle);
-  await mouse(practiceSession, 'mouseMoved', practiceDragStart.x, practiceDragStart.y, 1);
-  await mouse(practiceSession, 'mouseReleased', practiceDragStart.x, practiceDragStart.y, 0);
-  await sleep(350);
-  const practiceRemoteStartCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== practiceRemoteStartCanceled) throw new Error('uncharged remote-start drag fired');
-  await touch(practiceSession, 'touchStart', [[8, practiceDragStart.x, practiceDragStart.y]]);
-  await sleep(120);
-  await touch(practiceSession, 'touchMove', [[8, practiceDragStart.x - 100, practiceDragStart.y]]);
-  await until('practice anywhere-start touch charges', async () => (await imageHash(practiceSession)) !== practiceRemoteStartCanceled);
-  await touch(practiceSession, 'touchMove', [[8, practiceDragStart.x, practiceDragStart.y]]);
-  await sleep(120);
-  await touch(practiceSession, 'touchEnd', []);
-  await sleep(300);
-  const remoteTouchCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== remoteTouchCanceled) throw new Error('uncharged anywhere-start touch fired');
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 0);
-  await mouse(practiceSession, 'mousePressed', practiceOrigin.x, practiceOrigin.y, 1);
-  await sleep(120);
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 90, practiceOrigin.y, 1);
-  await until('practice drag changes local canvas', async () => (await imageHash(practiceSession)) !== remoteTouchCanceled);
-  const practiceCharged = await imageHash(practiceSession);
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 65, practiceOrigin.y + 35, 1);
-  await until('practice drag updates direction and power', async () => (await imageHash(practiceSession)) !== practiceCharged);
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 1);
-  await mouse(practiceSession, 'mouseReleased', practiceOrigin.x, practiceOrigin.y, 0);
-  await sleep(200);
-  const practiceCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== practiceCanceled) throw new Error('practice dead-zone release started a shot');
-  await touch(practiceSession, 'touchStart', [[1, practiceOrigin.x, practiceOrigin.y]]);
-  await sleep(120);
-  await touch(practiceSession, 'touchMove', [[1, practiceOrigin.x - 105, practiceOrigin.y + 20]]);
-  await until('practice touch drag charges', async () => (await imageHash(practiceSession)) !== practiceCanceled);
-  await touch(practiceSession, 'touchCancel', []);
-  await sleep(350);
-  const practiceTouchCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== practiceTouchCanceled) throw new Error('canceled touch fired a practice shot');
-  await touch(practiceSession, 'touchStart', [[3, practiceOrigin.x, practiceOrigin.y]]);
-  await sleep(120);
-  await touch(practiceSession, 'touchMove', [[3, practiceOrigin.x - 105, practiceOrigin.y + 20]]);
-  await until('practice multitouch gesture charges', async () => (await imageHash(practiceSession)) !== practiceTouchCanceled);
+  await touch(practiceSession, 'touchMove', [[3, bar.x, bar.y + 105 * practiceScale]]);
+  await until('practice multitouch gesture charges', async () => (await imageHash(practiceSession)) !== touchBarCanceled);
   await touch(practiceSession, 'touchStart', [
-    [3, practiceOrigin.x - 105, practiceOrigin.y + 20],
+    [3, bar.x, bar.y + 105 * practiceScale],
     [4, practiceOrigin.x + 105, practiceOrigin.y + 20],
   ]);
   await sleep(120);
-  await touch(practiceSession, 'touchEnd', [[3, practiceOrigin.x - 105, practiceOrigin.y + 20]]);
+  await touch(practiceSession, 'touchEnd', [[3, bar.x, bar.y + 105 * practiceScale]]);
   await sleep(120);
   await touch(practiceSession, 'touchEnd', []);
-  await sleep(350);
-  const practiceMultitouchCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== practiceMultitouchCanceled) throw new Error('second finger allowed a practice shot');
+  const practiceMultitouchCanceled = await stillAfter('a second finger');
   // A real tab switch must interrupt a charged mouse gesture. Do not count a
   // synthetic blur or CDP focus-emulation setting as a device interruption.
   const {targetId: otherTab} = await send('Target.createTarget', {url: 'about:blank', browserContextId: practice.browserContextId});
   await send('Target.activateTarget', {targetId: practice.targetId});
   await until('practice tab gains focus', () => evaluate(practiceSession, 'document.hasFocus()'));
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 0);
-  await mouse(practiceSession, 'mousePressed', practiceOrigin.x, practiceOrigin.y, 1);
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 0);
+  await mouse(practiceSession, 'mousePressed', bar.x, bar.y, 1);
   await sleep(120);
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 100, practiceOrigin.y + 15, 1);
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y + 100 * practiceScale, 1);
   await until('practice focus-loss drag charges', async () => (await imageHash(practiceSession)) !== practiceMultitouchCanceled);
   const chargedBeforeFocusLoss = await imageHash(practiceSession);
   await send('Target.activateTarget', {targetId: otherTab});
@@ -364,18 +315,16 @@ try {
   await send('Target.activateTarget', {targetId: practice.targetId});
   await until('practice tab regains focus', () => evaluate(practiceSession, 'document.hasFocus()'));
   await until('focus loss clears charged cue', async () => (await imageHash(practiceSession)) !== chargedBeforeFocusLoss);
-  await mouse(practiceSession, 'mouseReleased', practiceOrigin.x - 100, practiceOrigin.y + 15, 0);
-  await sleep(350);
-  const focusCanceled = await imageHash(practiceSession);
-  await sleep(250);
-  if (await imageHash(practiceSession) !== focusCanceled) throw new Error('tab switch fired an interrupted practice shot');
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x, practiceOrigin.y, 0);
-  await mouse(practiceSession, 'mousePressed', practiceOrigin.x, practiceOrigin.y, 1);
+  await mouse(practiceSession, 'mouseReleased', bar.x, bar.y + 100 * practiceScale, 0);
+  const focusCanceled = await stillAfter('a tab switch');
+  // A charged release shoots.
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y, 0);
+  await mouse(practiceSession, 'mousePressed', bar.x, bar.y, 1);
   await sleep(120);
-  await mouse(practiceSession, 'mouseMoved', practiceOrigin.x - 110, practiceOrigin.y + 25, 1);
-  await until('practice second drag charges', async () => (await imageHash(practiceSession)) !== practiceCanceled);
+  await mouse(practiceSession, 'mouseMoved', bar.x, bar.y + 110 * practiceScale, 1);
+  await until('practice charge before release', async () => (await imageHash(practiceSession)) !== focusCanceled);
   const practiceSecondCharged = await imageHash(practiceSession);
-  await mouse(practiceSession, 'mouseReleased', practiceOrigin.x - 110, practiceOrigin.y + 25, 0);
+  await mouse(practiceSession, 'mouseReleased', bar.x, bar.y + 110 * practiceScale, 0);
   await until('practice charged release clears cue', async () => (await imageHash(practiceSession)) !== practiceSecondCharged);
   await sleep(200);
   const practiceMoving = await imageHash(practiceSession);
@@ -389,20 +338,16 @@ try {
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, focusOpponent);
   await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
   await until('focus shooter is player one', () => evaluate(focusShooter, 'document.querySelector("#match-status")?.textContent.includes("your turn")'), 20000);
-  // Keep the established combined-gesture interruption regression; separate
-  // mode is checked below on the same match after reselecting the new default.
-  await evaluate(focusShooter, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '0'; control.dispatchEvent(new Event('change', {bubbles: true}));
-  })()`);
   const focusCanvas = JSON.parse(await evaluate(focusShooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const focusScale = Math.min(focusCanvas.width / 1220, focusCanvas.height / 590);
   const focusOrigin = {x: focusCanvas.x + focusCanvas.width / 2 - 295 * focusScale, y: focusCanvas.y + focusCanvas.height / 2};
+  const focusBar = {x: focusCanvas.x + focusCanvas.width / 2 + 565 * focusScale,
+    y: focusCanvas.y + focusCanvas.height / 2};
   const focusBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
-  await mouse(focusShooter, 'mousePressed', focusOrigin.x, focusOrigin.y, 1);
+  await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y, 0);
+  await mouse(focusShooter, 'mousePressed', focusBar.x, focusBar.y, 1);
   await sleep(120);
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x - 100, focusOrigin.y + 15, 1);
+  await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y + 100 * focusScale, 1);
   await until('focus match opponent sees charged drag', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(focusBefore).some(frame => !preview(frame).cancel && preview(frame).power > 1000));
   await send('Target.activateTarget', {targetId: focusOpponentPage.targetId});
   const focusChargedImage = await imageHash(focusOpponent);
@@ -414,54 +359,77 @@ try {
   await until('opponent drops interrupted cue', async () => (await imageHash(focusOpponent)) !== focusChargedImage, 5000);
   await send('Target.activateTarget', {targetId: focusShooterPage.targetId});
   await until('match shooter regains focus', () => evaluate(focusShooter, 'document.hasFocus()'));
-  await mouse(focusShooter, 'mouseReleased', focusOrigin.x, focusOrigin.y, 0);
+  await mouse(focusShooter, 'mouseReleased', focusBar.x, focusBar.y, 0);
   // Session v2 closes the socket while the tab is hidden; a contact that
   // starts before the session is ready again is deliberately ignored.
   await until('match shooter session reconnects', () => evaluate(focusShooter, 'document.querySelector("#match-status")?.textContent.startsWith("Connected") && document.querySelector("#match-status")?.textContent.includes("your turn")'));
   await sleep(200);
   const resumedBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 0);
-  await mouse(focusShooter, 'mousePressed', focusOrigin.x, focusOrigin.y, 1);
+  await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y, 0);
+  await mouse(focusShooter, 'mousePressed', focusBar.x, focusBar.y, 1);
   await sleep(120);
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x - 95, focusOrigin.y + 30, 1);
+  await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y + 95 * focusScale, 1);
   await until('same-match drag resumes after tab interruption', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(resumedBefore).some(frame => !preview(frame).cancel && preview(frame).power > 1000));
-  await mouse(focusShooter, 'mouseMoved', focusOrigin.x, focusOrigin.y, 1);
-  await until('resumed match drag cancels at origin', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(resumedBefore).some(frame => preview(frame).cancel === 1));
-  await mouse(focusShooter, 'mouseReleased', focusOrigin.x, focusOrigin.y, 0);
+  await mouse(focusShooter, 'mouseMoved', focusBar.x, focusBar.y, 1);
+  await until('resumed match drag cancels at zero power', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(resumedBefore).some(frame => preview(frame).cancel === 1));
+  await mouse(focusShooter, 'mouseReleased', focusBar.x, focusBar.y, 0);
   if (commandsSent(focusShooter).length) {
     throw new Error('match tab interruption submitted a shot');
   }
-  // Same seeded match, separate control mode: aim-only must reach the opponent
-  // at zero power, and the bar must change power without altering that aim.
-  await evaluate(focusShooter, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '1'; control.dispatchEvent(new Event('change', {bubbles: true}));
-  })()`);
-  const separateBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
-  // Contact location relative to the cue ball must determine aim immediately,
-  // regardless of the direction in which the pointer subsequently moves.
-  const leftOfCue = {x: focusOrigin.x - 110, y: focusOrigin.y};
-  const rightOfCue = {x: focusOrigin.x + 120, y: focusOrigin.y};
+  // One aiming model on the same seeded match. Aim-only planning reaches the
+  // opponent at zero power, and nothing here may submit a shot.
+  const aimPreviews = (from) => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(from).map(preview);
+  const turnSteps = (from, to) => ((to - from) % 10000 + 15000) % 10000 - 5000;
+  // The same counter-clockwise sweep turns the cue counter-clockwise whether
+  // the finger is ahead of the ball or behind it on the cue.
+  for (const [label, offset, sweep] of [['ahead of', 200, -40], ['behind', -200, 40]]) {
+    const before = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+    const grab = {x: focusOrigin.x + offset * focusScale, y: focusOrigin.y};
+    await mouse(focusShooter, 'mouseMoved', grab.x, grab.y, 0);
+    await mouse(focusShooter, 'mousePressed', grab.x, grab.y, 1);
+    const start = await until(`opponent sees the grab ${label} the ball without an aim jump`, () => aimPreviews(before).find(value => !value.cancel && value.power === 0));
+    await sleep(120);
+    await mouse(focusShooter, 'mouseMoved', grab.x, grab.y + sweep * focusScale, 1);
+    const turned = await until(`dragging ${label} the ball rotates the cue`, () => aimPreviews(before).find(value => !value.cancel && value.power === 0 && value.sequence > start.sequence && value.aim !== start.aim));
+    const delta = turnSteps(start.aim, turned.aim);
+    if (delta <= 0 || delta > 2500) throw new Error(`dragging ${label} the ball turned the cue ${delta} steps instead of counter-clockwise`);
+    await mouse(focusShooter, 'mouseReleased', grab.x, grab.y + sweep * focusScale, 0);
+    await until(`releasing a drag ${label} the ball cancels planning`, () => aimPreviews(before).some(value => value.cancel === 1));
+  }
+  // A quick tap left of the cue ball points the cue straight left.
+  const tapBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+  const leftOfCue = {x: focusOrigin.x - 150 * focusScale, y: focusOrigin.y};
   await mouse(focusShooter, 'mouseMoved', leftOfCue.x, leftOfCue.y, 0);
   await mouse(focusShooter, 'mousePressed', leftOfCue.x, leftOfCue.y, 1);
-  const leftAim = await until('opponent sees contact left of cue ball aim left immediately', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.aim > 4000 && value.aim < 6000));
-  await mouse(focusShooter, 'mouseMoved', leftOfCue.x + 25, leftOfCue.y, 1);
-  await sleep(120);
-  const afterLeft = previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).filter(value => !value.cancel && value.sequence > leftAim.sequence);
-  if (afterLeft.some(value => value.aim < 4000 || value.aim > 6000)) throw new Error('moving right while left of cue ball reversed aim');
-  await mouse(focusShooter, 'mouseMoved', rightOfCue.x, rightOfCue.y, 1);
-  const rightAim = await until('opponent sees pointer cross to right of cue ball', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.sequence > leftAim.sequence && (value.aim < 800 || value.aim > 9200)));
-  await mouse(focusShooter, 'mouseMoved', leftOfCue.x, leftOfCue.y, 1);
-  const aimed = await until('opponent sees pointer return left of cue ball', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).find(value => !value.cancel && value.power === 0 && value.sequence > rightAim.sequence && value.aim > 4000 && value.aim < 6000));
+  await sleep(150);
   await mouse(focusShooter, 'mouseReleased', leftOfCue.x, leftOfCue.y, 0);
+  const tapped = await until('opponent sees a tap point the cue left', () => aimPreviews(tapBefore).find(value => !value.cancel && value.power === 0 && value.aim > 4000 && value.aim < 6000)).catch((error) => {
+    throw new Error(`${error.message}; received ${JSON.stringify(aimPreviews(tapBefore))}; sent ${JSON.stringify(previews(focusShooter, 'Network.webSocketFrameSent').slice(-4).map(preview))}`);
+  });
+  // The AIM roller makes a small, proportional turn.
+  const rollerBefore = previews(focusOpponent, 'Network.webSocketFrameReceived').length;
+  const focusRoller = {x: focusCanvas.x + focusCanvas.width / 2 + 500 * focusScale,
+    y: focusCanvas.y + focusCanvas.height / 2};
+  await mouse(focusShooter, 'mouseMoved', focusRoller.x, focusRoller.y, 0);
+  await mouse(focusShooter, 'mousePressed', focusRoller.x, focusRoller.y, 1);
+  await sleep(120);
+  await mouse(focusShooter, 'mouseMoved', focusRoller.x, focusRoller.y - 50 * focusScale, 1);
+  const fineTuned = await until('opponent sees the AIM roller turn the cue slightly', () => aimPreviews(rollerBefore).find(value => !value.cancel && value.power === 0 && value.aim !== tapped.aim));
+  const fineDelta = turnSteps(tapped.aim, fineTuned.aim);
+  if (fineDelta <= 0 || fineDelta > 100) throw new Error(`AIM roller turned the cue ${fineDelta} steps; expected a small counter-clockwise turn`);
+  await mouse(focusShooter, 'mouseReleased', focusRoller.x, focusRoller.y - 50 * focusScale, 0);
+  const aimed = aimPreviews(rollerBefore).filter(value => !value.cancel).at(-1);
+  if (commandsSent(focusShooter).length) {
+    throw new Error('aiming submitted a shot');
+  }
   await send('Target.activateTarget', {targetId: focusOpponentPage.targetId});
   const separateAimImage = await imageHash(focusOpponent);
-  const separateBar = {x: focusCanvas.x + focusCanvas.width / 2 + 565 * focusScale,
-    y: focusCanvas.y + focusCanvas.height / 2};
+  const separateBar = focusBar;
   await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y, 0);
   await mouse(focusShooter, 'mousePressed', separateBar.x, separateBar.y, 1);
   await sleep(120);
   await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y + 100 * focusScale, 1);
+  const separateBefore = rollerBefore;
   await until('opponent sees separate bar power with fixed aim', () => previews(focusOpponent, 'Network.webSocketFrameReceived').slice(separateBefore).map(preview).some(value => !value.cancel && value.power > 1000 && value.aim === aimed.aim));
   await until('opponent visibly sees separate power planning', async () => (await imageHash(focusOpponent)) !== separateAimImage);
   await mouse(focusShooter, 'mouseMoved', separateBar.x, separateBar.y, 1);
@@ -502,14 +470,12 @@ try {
   const deadlineScale = Math.min(deadlineCanvas.width / 1220, deadlineCanvas.height / 590);
   const deadlineOrigin = {x: deadlineCanvas.x + deadlineCanvas.width / 2 - 295 * deadlineScale,
     y: deadlineCanvas.y + deadlineCanvas.height / 2};
-  await evaluate(deadlineShooter, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '0'; control.dispatchEvent(new Event('change', {bubbles: true}));
-  })()`);
-  await mouse(deadlineShooter, 'mouseMoved', deadlineOrigin.x, deadlineOrigin.y, 0);
-  await mouse(deadlineShooter, 'mousePressed', deadlineOrigin.x, deadlineOrigin.y, 1);
+  const deadlineBar = {x: deadlineCanvas.x + deadlineCanvas.width / 2 + 565 * deadlineScale,
+    y: deadlineCanvas.y + deadlineCanvas.height / 2};
+  await mouse(deadlineShooter, 'mouseMoved', deadlineBar.x, deadlineBar.y, 0);
+  await mouse(deadlineShooter, 'mousePressed', deadlineBar.x, deadlineBar.y, 1);
   await sleep(120);
-  await mouse(deadlineShooter, 'mouseMoved', deadlineOrigin.x - 100, deadlineOrigin.y + 15, 1);
+  await mouse(deadlineShooter, 'mouseMoved', deadlineBar.x, deadlineBar.y + 100 * deadlineScale, 1);
   await until('deadline opponent sees charged drag', () => previews(deadlineOpponent, 'Network.webSocketFrameReceived').some(frame => {
     const value = preview(frame);
     return !value.cancel && value.power > 1000;
@@ -535,8 +501,8 @@ try {
   await until('deadline clears opponent planning cue', async () => (await imageHash(deadlineOpponent)) !== beforeDeadlineImage);
   await send('Target.activateTarget', {targetId: deadlineShooterPage.targetId});
   const beforeLatePreview = previews(deadlineOpponent, 'Network.webSocketFrameReceived').length;
-  await mouse(deadlineShooter, 'mouseMoved', deadlineOrigin.x - 130, deadlineOrigin.y + 35, 1);
-  await mouse(deadlineShooter, 'mouseReleased', deadlineOrigin.x - 130, deadlineOrigin.y + 35, 0);
+  await mouse(deadlineShooter, 'mouseMoved', deadlineBar.x, deadlineBar.y + 130 * deadlineScale, 1);
+  await mouse(deadlineShooter, 'mouseReleased', deadlineBar.x, deadlineBar.y + 130 * deadlineScale, 0);
   await sleep(400);
   if (previews(deadlineOpponent, 'Network.webSocketFrameReceived').length !== beforeLatePreview ||
       commandsSent(deadlineShooter).length) {
@@ -547,10 +513,6 @@ try {
     throw new Error('late release changed canonical state after deadline');
   }
   await send('Target.activateTarget', {targetId: one.targetId});
-  await evaluate(shooter, `(() => {
-    const control = document.querySelector('#shot-control-mode');
-    control.value = '0'; control.dispatchEvent(new Event('change', {bubbles: true}));
-  })()`);
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, shooter);
   await send('Emulation.setFocusEmulationEnabled', {enabled: true}, opponent);
   await send('Target.activateTarget', {targetId: two.targetId});
@@ -559,6 +521,9 @@ try {
   const canvas = JSON.parse(await evaluate(shooter, 'JSON.stringify((({x,y,width,height}) => ({x,y,width,height}))(document.querySelector("#pwmtf-canvas").getBoundingClientRect()))'));
   const scale = Math.min(canvas.width / 1220, canvas.height / 590);
   const origin = {x: canvas.x + canvas.width / 2 - 295 * scale, y: canvas.y + canvas.height / 2};
+  const matchBar = {x: canvas.x + canvas.width / 2 + 565 * scale, y: canvas.y + canvas.height / 2};
+  // Power-bar position for a given charge, in design units below its zero point.
+  const charge = (units) => [matchBar.x, matchBar.y + units * scale];
   const matchDragStart = {x: origin.x + 540 * scale, y: origin.y - 95 * scale};
   await mouse(shooter, 'mouseMoved', matchDragStart.x, matchDragStart.y, 0);
   await mouse(shooter, 'mousePressed', matchDragStart.x, matchDragStart.y, 1);
@@ -568,12 +533,12 @@ try {
   await mouse(shooter, 'mouseMoved', matchDragStart.x, matchDragStart.y, 1);
   await mouse(shooter, 'mouseReleased', matchDragStart.x, matchDragStart.y, 0);
   await until('opponent sees anywhere-start cancel', () => previews(opponent, 'Network.webSocketFrameReceived').some(frame => preview(frame).cancel));
-  if (await evaluate(shooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')) throw new Error('anywhere-start dead-zone release fired a match shot');
+  if (await evaluate(shooter, 'document.querySelector("#match-status")?.textContent.includes("revision 1")')) throw new Error('a table rotation drag fired a match shot');
   const previewStart = previews(opponent, 'Network.webSocketFrameReceived').length;
-  await mouse(shooter, 'mouseMoved', origin.x, origin.y, 0);
-  await mouse(shooter, 'mousePressed', origin.x, origin.y, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(0), 0);
+  await mouse(shooter, 'mousePressed', ...charge(0), 1);
   await sleep(100);
-  await mouse(shooter, 'mouseMoved', origin.x - 90, origin.y, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(90), 1);
   await until('first charged preview', () => previews(opponent, 'Network.webSocketFrameReceived').slice(previewStart).some(frame => {
     const value = preview(frame);
     return !value.cancel && value.power > 1000;
@@ -601,46 +566,41 @@ try {
   await send('Target.activateTarget', {targetId: one.targetId});
   await send('Network.emulateNetworkConditions', {offline: false, latency: 180, downloadThroughput: -1, uploadThroughput: -1}, opponent);
   const delayedStart = previews(opponent, 'Network.webSocketFrameReceived').length;
-  await mouse(shooter, 'mouseMoved', origin.x - 120, origin.y + 20, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(130), 1);
   await until('changed preview under network delay', () => previews(opponent, 'Network.webSocketFrameReceived').slice(delayedStart).some(frame => {
     const value = preview(frame);
-    return !value.cancel && value.aim !== first.aim && value.power !== first.power && value.sequence > first.sequence;
+    return !value.cancel && value.power > first.power && value.sequence > first.sequence;
   }));
   const second = preview(previews(opponent, 'Network.webSocketFrameReceived').slice(delayedStart).find(frame => {
     const value = preview(frame);
-    return !value.cancel && value.aim !== first.aim && value.power !== first.power && value.sequence > first.sequence;
+    return !value.cancel && value.power > first.power && value.sequence > first.sequence;
   }));
   await send('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1}, opponent);
-  if (second.aim === first.aim || second.power === first.power || second.sequence <= first.sequence) {
-    throw new Error('direction and power did not update together');
-  }
-  await mouse(shooter, 'mouseMoved', origin.x - 65, origin.y + 35, 1);
+  if (second.aim !== first.aim) throw new Error('charging power changed the aim');
+  await mouse(shooter, 'mouseMoved', ...charge(60), 1);
   await until('shortened preview', () => previews(opponent, 'Network.webSocketFrameReceived').some(frame => {
     const value = preview(frame);
-    return !value.cancel && value.aim !== second.aim && value.power < second.power && value.sequence > second.sequence;
+    return !value.cancel && value.power < second.power && value.sequence > second.sequence;
   }));
   const shortened = preview(previews(opponent, 'Network.webSocketFrameReceived').find(frame => {
     const value = preview(frame);
-    return !value.cancel && value.aim !== second.aim && value.power < second.power && value.sequence > second.sequence;
+    return !value.cancel && value.power < second.power && value.sequence > second.sequence;
   }));
-  if (shortened.aim === second.aim || shortened.power >= second.power) {
-    throw new Error('shortening drag did not adjust aim and power');
-  }
   const beforeReversal = previews(opponent, 'Network.webSocketFrameReceived').length;
-  await mouse(shooter, 'mouseMoved', origin.x + 75, origin.y - 30, 1);
-  await until('opponent sees reversal without a new press', () => previews(opponent, 'Network.webSocketFrameReceived').slice(beforeReversal).some(frame => {
+  await mouse(shooter, 'mouseMoved', ...charge(150), 1);
+  await until('opponent sees power rise again without a new press', () => previews(opponent, 'Network.webSocketFrameReceived').slice(beforeReversal).some(frame => {
     const value = preview(frame);
-    return !value.cancel && value.sequence > shortened.sequence && value.aim !== shortened.aim && value.power > 1000;
+    return !value.cancel && value.sequence > shortened.sequence && value.power > shortened.power && value.power > 1000;
   }));
   const reversed = preview(previews(opponent, 'Network.webSocketFrameReceived').slice(beforeReversal).find(frame => {
     const value = preview(frame);
-    return !value.cancel && value.sequence > shortened.sequence && value.aim !== shortened.aim && value.power > 1000;
+    return !value.cancel && value.sequence > shortened.sequence && value.power > shortened.power && value.power > 1000;
   }));
   const beforeReturn = previews(opponent, 'Network.webSocketFrameReceived').length;
-  await mouse(shooter, 'mouseMoved', origin.x - 65, origin.y + 35, 1);
-  await until('opponent sees direction return and power readjust', () => previews(opponent, 'Network.webSocketFrameReceived').slice(beforeReturn).some(frame => {
+  await mouse(shooter, 'mouseMoved', ...charge(60), 1);
+  await until('opponent sees power readjust', () => previews(opponent, 'Network.webSocketFrameReceived').slice(beforeReturn).some(frame => {
     const value = preview(frame);
-    return !value.cancel && value.sequence > reversed.sequence && value.aim !== reversed.aim && value.power !== reversed.power;
+    return !value.cancel && value.sequence > reversed.sequence && value.power !== reversed.power;
   }));
   // Once a newer preview has reached the observer, a delayed old frame from
   // another authenticated socket must never be delivered to it. (Comparing
@@ -679,7 +639,7 @@ try {
   // Cancel while the observer is offline: the cancel frame cannot reach it.
   await send('Debugger.resume', {}, shooter);
   await send('Target.activateTarget', {targetId: one.targetId});
-  await mouse(shooter, 'mouseMoved', origin.x, origin.y, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(0), 1);
   await until('shooter sends offline cancel', () => previews(shooter, 'Network.webSocketFrameSent').some(frame => {
     const value = preview(frame);
     return value.cancel === 1 && value.sequence > shortened.sequence;
@@ -702,7 +662,7 @@ try {
   await send('Debugger.resume', {}, shooter);
   await send('Debugger.disable', {}, shooter);
   await send('Target.activateTarget', {targetId: one.targetId});
-  await mouse(shooter, 'mouseMoved', origin.x - 115, origin.y + 22, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(120), 1);
   await until('reconnected opponent receives new preview', () => previews(opponent, 'Network.webSocketFrameReceived').some(frame => {
     const value = preview(frame);
     return !value.cancel && value.sequence > shortened.sequence;
@@ -710,12 +670,12 @@ try {
   await send('Target.activateTarget', {targetId: two.targetId});
   const beforeCancel = await imageHash(opponent);
   await send('Target.activateTarget', {targetId: one.targetId});
-  await mouse(shooter, 'mouseMoved', origin.x, origin.y, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(0), 1);
   await until('cancel preview', () => previews(opponent, 'Network.webSocketFrameReceived').some(frame => preview(frame).cancel === 1));
   await send('Target.activateTarget', {targetId: two.targetId});
   await until('opponent preview clears', async () => (await imageHash(opponent)) !== beforeCancel);
   await send('Target.activateTarget', {targetId: one.targetId});
-  await mouse(shooter, 'mouseMoved', origin.x - 115, origin.y + 22, 1);
+  await mouse(shooter, 'mouseMoved', ...charge(120), 1);
   await until('resumed preview', () => previews(opponent, 'Network.webSocketFrameReceived').some(frame => {
     const value = preview(frame);
     return value.sequence > shortened.sequence && value.cancel === 0;
@@ -750,7 +710,7 @@ try {
     }, 20);
     return true;
   })()`);
-  await mouse(shooter, 'mouseReleased', origin.x - 120, origin.y + 20, 0);
+  await mouse(shooter, 'mouseReleased', ...charge(125), 0);
   await send('Target.activateTarget', {targetId: two.targetId});
   await until('authoritative revision 1', () => evaluate(opponent, 'document.querySelector("#match-status")?.textContent.includes("revision 1")'), 30000);
   await until('observer shot playback settles', async () => {
@@ -794,7 +754,7 @@ try {
   for (const session of [shooter, opponent, focusShooter, focusOpponent, deadlineShooter, deadlineOpponent]) {
     if (textFrames(session).length) throw new Error('a session WebSocket carried a text frame');
   }
-  console.log('practice combined and separate controls (mouse aim/bar, touch cancellation), combined mouse/touch/multitouch and real tab-switch cancel, drag/dead-zone/local shot; two-browser separate aim/power preview and one authoritative bar-release shot, combined live aim/power, match tab-switch interruption, reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
+  console.log('practice rotation behind the ball, tap-to-point, AIM roller, power-bar dead zone, touch/multitouch/tab-switch cancellation and local shot; match rotation ahead of and behind the ball, tap, roller, fixed-aim power planning and one authoritative bar-release shot, tab-switch interruption, power reversal, deadline interruption, delay, stale rejection, lost cancel, idle expiry, offline reconnect, observer mid-shot playback and outsider isolation passed');
 } catch (error) {
   console.error(`two-browser shot failed: ${error.stack ?? error}`);
   process.exitCode = 1;

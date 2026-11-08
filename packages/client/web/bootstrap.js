@@ -176,7 +176,6 @@ canvas.addEventListener("pointerdown", () => {
 // Initialized WASM module; null until its exports are safe to call.
 let wasmModule = null;
 const aimMode = document.querySelector("#aim-mode");
-const shotControlMode = document.querySelector("#shot-control-mode");
 const unlimitedAimRange = document.querySelector("#unlimited-aim-range");
 // Device-local presentation preferences only; never persist shot inputs or identity.
 const preferencesKey = "pwmtf.presentation.v1";
@@ -186,7 +185,6 @@ function loadPresentationPreferences() {
     if (raw === null || raw.length > 256) return;
     const value = JSON.parse(raw);
     if (value === null || typeof value !== "object" || Array.isArray(value) || value.version !== 1) return;
-    if (value.shotControl === 0 || value.shotControl === 1) shotControlMode.value = String(value.shotControl);
     if (value.aimGuide === 0 || value.aimGuide === 1 || value.aimGuide === 2) aimMode.value = String(value.aimGuide);
     if (typeof value.unlimitedRange === "boolean") unlimitedAimRange.checked = value.unlimitedRange;
   } catch {
@@ -197,7 +195,6 @@ function savePresentationPreferences() {
   try {
     window.localStorage.setItem(preferencesKey, JSON.stringify({
       version: 1,
-      shotControl: Number(shotControlMode.value),
       aimGuide: Number(aimMode.value),
       unlimitedRange: unlimitedAimRange.checked,
     }));
@@ -206,26 +203,6 @@ function savePresentationPreferences() {
   }
 }
 loadPresentationPreferences();
-const shotControlInstructions = document.querySelector("#shot-control-instructions");
-const gameHelp = document.querySelector("#game-help");
-const combinedHelp = "Drag back anywhere on the table to aim and power · Release to shoot";
-const separateHelp = "Touch a direction on the table to aim · Drag POWER down and release to shoot";
-function applyShotControlMode() {
-  const separate = shotControlMode.value === "1";
-  wasmModule?.set_shot_control_mode(separate ? 1 : 0);
-  gameHelp.textContent = separate ? separateHelp : combinedHelp;
-  shotControlInstructions.textContent = separate
-    ? "Touch anywhere on the table to aim from the cue ball toward that point; drag to refine direction without shooting. Drag the POWER bar down to adjust strength; release a charged pull to shoot. The amber line shows power, not the ball's predicted travel."
-    : "Start anywhere on the table and drag back to aim and set power together. Short pulls cancel; release a charged pull to shoot. The POWER bar shows your current strength.";
-  canvas.setAttribute("aria-label", separate
-    ? "Pool table. Touch a point to aim from the cue ball toward it; drag to refine. Drag the POWER bar down and release to shoot."
-    : "Pool table. Drag anywhere on the table to aim and power the shot; release to shoot.");
-}
-shotControlMode.addEventListener("change", () => {
-  applyShotControlMode();
-  savePresentationPreferences();
-});
-applyShotControlMode();
 const spinSide = document.querySelector("#spin-side");
 const spinVertical = document.querySelector("#spin-vertical");
 const spinButton = document.querySelector("#spin-button");
@@ -1574,7 +1551,6 @@ try {
   module.set_session_listener(handleSessionEvent);
   wasmModule = module;
   wasmModule.set_aim_mode(Number(aimMode.value));
-  applyShotControlMode();
   updateSpin();
   wasmModule.set_unlimited_aim_range(unlimitedAimRange.checked);
   // Subscriptions requested before the module loaded are applied now; the

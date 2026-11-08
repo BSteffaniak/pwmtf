@@ -35,27 +35,18 @@ const BALL_RADIUS: f32 = {
 };
 const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_BAR_X: f32 = 565.0;
-#[cfg(target_arch = "wasm32")]
-static SHOT_CONTROL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
-
-/// Selects combined drag (0) or separate table aim and power-bar drag (1).
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub fn set_shot_control_mode(mode: u8) {
-    SHOT_CONTROL_MODE.store(u8::from(mode == 1), std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), allow(clippy::missing_const_for_fn))]
-fn shot_control_mode() -> u8 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        SHOT_CONTROL_MODE.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        1
-    }
-}
+/// Fine-tune roller beside the power bar, in design units.
+const FINE_AIM_X: f32 = 500.0;
+const FINE_AIM_RIDGES: usize = 12;
+/// Aim turn per design unit dragged along the roller (about 0.034°).
+const FINE_AIM_RADIANS_PER_UNIT: f32 = 0.0006;
+/// Rotation is damped proportionally inside this distance from the cue ball,
+/// so a finger passing over the ball cannot whip the cue around.
+const MIN_AIM_LEVER: f32 = BALL_RADIUS * 5.0;
+/// A contact that stays within this distance and duration is a tap, which
+/// points the cue at the tapped spot instead of rotating it.
+const TAP_SLOP: f32 = 14.0;
+const TAP_MAX_SECONDS: f64 = 0.3;
 #[cfg(target_arch = "wasm32")]
 const POCKET_SELECTION_RADIUS: f32 = 44.0;
 #[cfg(target_arch = "wasm32")]
@@ -87,6 +78,9 @@ struct Cue;
 
 #[derive(Component)]
 struct PowerFill;
+
+#[derive(Component)]
+struct FineAimRidge(usize);
 
 #[derive(Component)]
 struct OrientationNotice;
@@ -128,7 +122,11 @@ struct PrototypeInput {
     active_touch: Option<u64>,
     pointer_contact: PointerContact,
     drag_origin: Option<Vec2>,
-    contact_mode: u8,
+    /// Last pointer position of the current contact, in design units.
+    drag_last: Option<Vec2>,
+    /// Farthest the current contact has strayed from its origin.
+    drag_travel: f32,
+    drag_started_at: f64,
     interrupted: bool,
     #[cfg(target_arch = "wasm32")]
     preview_gesture: u64,
@@ -154,17 +152,19 @@ enum PointerContact {
     #[default]
     None,
     Aim,
+    FineAim,
     Power,
     #[cfg(target_arch = "wasm32")]
     Auxiliary,
 }
 
 impl PrototypeInput {
-    fn release_active_touch(&mut self, another_touch_is_pressed: bool) {
+    const fn release_active_touch(&mut self, another_touch_is_pressed: bool) {
         self.active_touch = None;
         self.pointer_contact = PointerContact::None;
         self.drag_origin = None;
-        self.contact_mode = shot_control_mode();
+        self.drag_last = None;
+        self.drag_travel = 0.0;
         self.power = 0.0;
         self.interrupted = another_touch_is_pressed;
         #[cfg(target_arch = "wasm32")]
@@ -198,7 +198,9 @@ impl Default for PrototypeInput {
             active_touch: None,
             pointer_contact: PointerContact::None,
             drag_origin: None,
-            contact_mode: shot_control_mode(),
+            drag_last: None,
+            drag_travel: 0.0,
+            drag_started_at: 0.0,
             interrupted: false,
             #[cfg(target_arch = "wasm32")]
             preview_gesture: 0,
@@ -478,10 +480,8 @@ fn update_sandbox(
     presentation.status = Some(
         if sandbox.moving {
             "Practice · balls rolling…"
-        } else if shot_control_mode() == 1 {
-            "Practice · drag the table to aim · drag POWER down and release to shoot"
         } else {
-            "Practice · drag anywhere on the table to aim and power · release to shoot"
+            "Practice · drag to rotate the cue · drag POWER down and release to shoot"
         }
         .into(),
     );
@@ -633,7 +633,33 @@ fn setup(
         TextColor(Color::srgb(0.94, 0.85, 0.64)),
         Transform::from_xyz(565.0, POWER_BAR_HEIGHT / 2.0 + 24.0, 6.0),
     ));
+
+    spawn_fine_aim_roller(&mut commands);
     spawn_overlay(&mut commands, presentation_tier.0);
+}
+
+/// Fine-tune roller beside the power bar; its ridges scroll with the aim.
+fn spawn_fine_aim_roller(commands: &mut Commands) {
+    spawn_rectangle(
+        commands,
+        Vec2::new(34.0, POWER_BAR_HEIGHT + 14.0),
+        Color::srgba(0.02, 0.02, 0.02, 0.72),
+        Vec3::new(FINE_AIM_X, 0.0, 5.0),
+    );
+    for index in 0..FINE_AIM_RIDGES {
+        commands.spawn((
+            Sprite::from_color(Color::srgba(0.94, 0.85, 0.64, 0.55), Vec2::new(22.0, 3.0)),
+            Transform::from_xyz(FINE_AIM_X, 0.0, 6.0),
+            FineAimRidge(index),
+            MatchControlChrome,
+        ));
+    }
+    commands.spawn((
+        Text2d::new("AIM"),
+        TextFont::from_font_size(16.0),
+        TextColor(Color::srgb(0.94, 0.85, 0.64)),
+        Transform::from_xyz(FINE_AIM_X, POWER_BAR_HEIGHT / 2.0 + 24.0, 6.0),
+    ));
 }
 
 fn spawn_table_details(commands: &mut Commands) {
@@ -1037,34 +1063,75 @@ fn pointer_on_power_bar(cursor: Vec2, size: Vec2) -> bool {
         && position.y.abs() <= POWER_BAR_HEIGHT / 2.0 + 14.0
 }
 
-fn classify_pointer_contact(cursor: Vec2, window_size: Vec2, mode: u8) -> PointerContact {
+fn pointer_on_fine_aim(cursor: Vec2, size: Vec2) -> bool {
+    let position = pointer_world(cursor, size);
+    position.is_finite()
+        && (position.x - FINE_AIM_X).abs() <= 26.0
+        && position.y.abs() <= POWER_BAR_HEIGHT / 2.0 + 14.0
+}
+
+fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
     #[cfg(target_arch = "wasm32")]
     if selected_pocket(cursor, window_size).is_some() {
         return PointerContact::Auxiliary;
     }
-    if mode == 1 && pointer_on_power_bar(cursor, window_size) {
-        return PointerContact::Power;
+    if pointer_on_power_bar(cursor, window_size) {
+        PointerContact::Power
+    } else if pointer_on_fine_aim(cursor, window_size) {
+        PointerContact::FineAim
+    } else {
+        PointerContact::Aim
     }
-    PointerContact::Aim
 }
 
-#[allow(clippy::missing_const_for_fn)]
-fn update_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
-    let Some(origin) = input.drag_origin else {
-        return;
-    };
-    let displacement = pointer_world(cursor, size) - origin;
-    if !displacement.is_finite() {
-        input.power = 0.0;
-        return;
+/// Keeps an angle in (-π, π].
+fn wrap_angle(angle: f32) -> f32 {
+    let wrapped =
+        (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    if wrapped <= -std::f32::consts::PI {
+        wrapped + std::f32::consts::TAU
+    } else {
+        wrapped
     }
-    let distance = displacement.length();
-    if distance > DRAG_DEAD_ZONE {
-        // Pull the cue away from the target; the ball travels in the opposite direction.
-        input.aim_angle = (-displacement).to_angle();
+}
+
+/// How far a finger moving from `last` to `now` turns the cue, which pivots
+/// rigidly on the cue ball. The same motion turns it the same way whether the
+/// finger is ahead of the ball or behind it on the cue; farther away gives
+/// finer control, and very close to the ball the turn is damped.
+fn rotation_delta(last: Vec2, now: Vec2, cue_ball: Vec2) -> f32 {
+    let before = last - cue_ball;
+    let after = now - cue_ball;
+    if !(before.is_finite() && after.is_finite()) {
+        return 0.0;
     }
-    input.power =
-        ((distance - DRAG_DEAD_ZONE) / (DRAG_FULL_POWER - DRAG_DEAD_ZONE)).clamp(0.0, 1.0);
+    let turn = before.perp_dot(after).atan2(before.dot(after));
+    let lever = before.length().min(after.length());
+    turn * (lever / MIN_AIM_LEVER).min(1.0)
+}
+
+fn rotate_aim(input: &mut PrototypeInput, now: Vec2, cue_ball: Vec2) {
+    if let Some(last) = input.drag_last {
+        input.aim_angle = wrap_angle(input.aim_angle + rotation_delta(last, now, cue_ball));
+    }
+    input.power = 0.0;
+}
+
+fn fine_tune_aim(input: &mut PrototypeInput, now: Vec2) {
+    if let Some(last) = input.drag_last {
+        let delta = (now.y - last.y) * FINE_AIM_RADIANS_PER_UNIT;
+        if delta.is_finite() {
+            input.aim_angle = wrap_angle(input.aim_angle + delta);
+        }
+    }
+}
+
+/// Points the cue from the cue ball toward a tapped spot.
+fn point_aim_at(input: &mut PrototypeInput, target: Vec2, cue_ball: Vec2) {
+    let direction = target - cue_ball;
+    if direction.is_finite() && direction.length() > BALL_RADIUS {
+        input.aim_angle = direction.to_angle();
+    }
 }
 
 fn update_power_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
@@ -1077,16 +1144,6 @@ fn update_power_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2) {
     } else {
         0.0
     };
-}
-
-fn update_aim_drag(input: &mut PrototypeInput, cursor: Vec2, size: Vec2, cue_ball: Vec2) {
-    let direction = pointer_world(cursor, size) - cue_ball;
-    // Separate controls point from the cue ball toward the contact, rather
-    // than reversing the distance moved since the contact began.
-    if direction.is_finite() && direction.length() > DRAG_DEAD_ZONE {
-        input.aim_angle = direction.to_angle();
-    }
-    input.power = 0.0;
 }
 
 #[allow(clippy::needless_pass_by_ref_mut)]
@@ -1119,17 +1176,27 @@ fn update_from_pointer(
             return;
         }
     }
-    if input.pointer_contact == PointerContact::Aim && input.drag_origin.is_some() {
-        if input.contact_mode == 1 {
-            if let Some(cue_ball) = cue_ball {
-                update_aim_drag(input, cursor, window_size, cue_ball);
-            }
-        } else {
-            update_drag(input, cursor, window_size);
-        }
-    } else if input.pointer_contact == PointerContact::Power && input.drag_origin.is_some() {
-        update_power_drag(input, cursor, window_size);
+    let Some(origin) = input.drag_origin else {
+        return;
+    };
+    let now = pointer_world(cursor, window_size);
+    if !now.is_finite() {
+        return;
     }
+    match input.pointer_contact {
+        PointerContact::Aim => {
+            if let Some(cue_ball) = cue_ball {
+                rotate_aim(input, now, cue_ball);
+            }
+        }
+        PointerContact::FineAim => fine_tune_aim(input, now),
+        PointerContact::Power => update_power_drag(input, cursor, window_size),
+        PointerContact::None => {}
+        #[cfg(target_arch = "wasm32")]
+        PointerContact::Auxiliary => {}
+    }
+    input.drag_travel = input.drag_travel.max(now.distance(origin));
+    input.drag_last = Some(now);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1216,15 +1283,26 @@ fn touch_release_is_intentional(active_touch: Option<u64>, touches: &Touches) ->
     active_touch.is_none_or(|id| touches.just_released(id))
 }
 
+/// A quick, nearly stationary table contact points the cue at the spot.
+fn contact_is_tap(input: &PrototypeInput, now: f64) -> bool {
+    input.pointer_contact == PointerContact::Aim
+        && input.drag_origin.is_some()
+        && input.drag_travel < TAP_SLOP
+        && now - input.drag_started_at <= TAP_MAX_SECONDS
+}
+
 fn contact_is_charged(input: &PrototypeInput) -> bool {
-    (input.pointer_contact == PointerContact::Aim && input.contact_mode == 0
-        || input.pointer_contact == PointerContact::Power && input.contact_mode == 1)
+    input.pointer_contact == PointerContact::Power
         && input.drag_origin.is_some()
         && input.power > 0.0
         && !input.touch_rearm_blocked
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
 fn update_input(
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -1233,6 +1311,7 @@ fn update_input(
     mut was_pressed: Local<bool>,
     mut sandbox: ResMut<sandbox::Sandbox>,
     presentation: Res<CanonicalPresentation>,
+    time: Res<Time<Real>>,
 ) {
     let mouse_is_pressed = mouse.pressed(MouseButton::Left);
     #[cfg(target_arch = "wasm32")]
@@ -1247,17 +1326,6 @@ fn update_input(
         }
     }
     let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
-    if input.contact_mode != shot_control_mode() {
-        if any_pressed || input.drag_origin.is_some() {
-            #[cfg(target_arch = "wasm32")]
-            if input.preview_active && input.preview_last_sent_at.is_some() {
-                publish_gesture(&mut input, true);
-            }
-            input.release_active_touch(true);
-        } else {
-            input.contact_mode = shot_control_mode();
-        }
-    }
     #[cfg(target_arch = "wasm32")]
     if !(browser_transport::accepts_active_player_command() || sandbox.enabled && !sandbox.moving) {
         if input.preview_active && input.preview_last_sent_at.is_some() {
@@ -1297,6 +1365,16 @@ fn update_input(
             input.release_active_touch(true);
             *was_pressed = false;
             return;
+        }
+        if contact_is_tap(&input, time.elapsed_secs_f64())
+            && let (Some(origin), Some(cue_ball)) =
+                (input.drag_origin, presentation.target.get(&0).copied())
+        {
+            point_aim_at(&mut input, origin, cue_ball);
+            #[cfg(target_arch = "wasm32")]
+            if !sandbox.enabled {
+                publish_tap_aim(&mut input);
+            }
         }
         let charged = contact_is_charged(&input);
         if sandbox.enabled && charged {
@@ -1349,30 +1427,25 @@ fn update_input(
         return;
     }
     if started_contact && !input.interrupted {
-        input.contact_mode = shot_control_mode();
-        input.pointer_contact = classify_pointer_contact(
-            cursor,
-            Vec2::new(window.width(), window.height()),
-            input.contact_mode,
-        );
+        let window_size = Vec2::new(window.width(), window.height());
+        input.pointer_contact = classify_pointer_contact(cursor, window_size);
         if matches!(
             input.pointer_contact,
-            PointerContact::Aim | PointerContact::Power
+            PointerContact::Aim | PointerContact::FineAim | PointerContact::Power
         ) {
+            let on_control = input.pointer_contact != PointerContact::Aim
+                || pointer_on_table(cursor, window_size);
             #[cfg(target_arch = "wasm32")]
-            let can_drag = !input.placing_cue_ball
-                && presentation.target.contains_key(&0)
-                && (input.pointer_contact == PointerContact::Power
-                    || pointer_on_table(cursor, Vec2::new(window.width(), window.height())));
+            let can_drag =
+                !input.placing_cue_ball && presentation.target.contains_key(&0) && on_control;
             #[cfg(not(target_arch = "wasm32"))]
-            let can_drag = presentation.target.contains_key(&0)
-                && (input.pointer_contact == PointerContact::Power
-                    || pointer_on_table(cursor, Vec2::new(window.width(), window.height())));
+            let can_drag = presentation.target.contains_key(&0) && on_control;
             if can_drag {
-                input.drag_origin = Some(pointer_world(
-                    cursor,
-                    Vec2::new(window.width(), window.height()),
-                ));
+                let origin = pointer_world(cursor, window_size);
+                input.drag_origin = Some(origin);
+                input.drag_last = Some(origin);
+                input.drag_travel = 0.0;
+                input.drag_started_at = time.elapsed_secs_f64();
                 input.power = 0.0;
                 #[cfg(target_arch = "wasm32")]
                 if !sandbox.enabled {
@@ -1411,7 +1484,10 @@ fn update_input(
         if !sandbox.enabled
             && input.drag_origin.is_some()
             && (input.power > 0.0
-                || input.contact_mode == 1 && input.pointer_contact == PointerContact::Aim)
+                || matches!(
+                    input.pointer_contact,
+                    PointerContact::Aim | PointerContact::FineAim
+                ))
         {
             publish_gesture(&mut input, false);
         } else if !sandbox.enabled
@@ -1479,6 +1555,31 @@ fn publish_gesture(input: &mut PrototypeInput, cancel: bool) {
     }
 }
 
+/// Shows the opponent where a tap pointed before the gesture's cancel. A tap
+/// is one deliberate change, so it bypasses the drag resend cadence.
+#[cfg(target_arch = "wasm32")]
+fn publish_tap_aim(input: &mut PrototypeInput) {
+    if !input.preview_active {
+        return;
+    }
+    let shot = practice_shot(input);
+    let preview = pwmtf_protocol::ShotPreview {
+        revision: input.preview_revision,
+        gesture: input.preview_gesture,
+        sequence: input.preview_sequence,
+        aim: shot.aim,
+        power: shot.power,
+        spin: shot.spin,
+        cancel: false,
+    };
+    if browser_transport::send_preview(preview).is_ok() {
+        input.preview_sequence = input.preview_sequence.wrapping_add(1);
+        input.preview_last_sent_power = shot.power.units();
+        input.preview_last_sent_aim = shot.aim.steps();
+        input.preview_last_sent_at = Some(browser_transport::monotonic_millis());
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
     let shot = practice_shot(input);
@@ -1514,8 +1615,12 @@ fn cue_transform(cue_ball: Vec2, aim_angle: f32, power: f32) -> Transform {
 fn update_aim(
     presentation: Res<CanonicalPresentation>,
     input: Res<PrototypeInput>,
-    mut cue: Single<&mut Transform, (With<Cue>, Without<PowerFill>)>,
-    mut power: Single<(&mut Sprite, &mut Transform), (With<PowerFill>, Without<Cue>)>,
+    mut cue: Single<&mut Transform, (With<Cue>, Without<PowerFill>, Without<FineAimRidge>)>,
+    mut power: Single<
+        (&mut Sprite, &mut Transform),
+        (With<PowerFill>, Without<Cue>, Without<FineAimRidge>),
+    >,
+    mut ridges: Query<(&FineAimRidge, &mut Transform), (Without<Cue>, Without<PowerFill>)>,
 ) {
     let cue_ball = presentation
         .target
@@ -1543,6 +1648,16 @@ fn update_aim(
     let fill_height = POWER_BAR_HEIGHT * strength;
     power.0.custom_size = Some(Vec2::new(30.0, fill_height));
     power.1.translation.y = (fill_height - POWER_BAR_HEIGHT) / 2.0;
+
+    #[allow(clippy::cast_precision_loss)]
+    let spacing = POWER_BAR_HEIGHT / FINE_AIM_RIDGES as f32;
+    let scroll = (angle / FINE_AIM_RADIANS_PER_UNIT).rem_euclid(spacing);
+    for (ridge, mut transform) in &mut ridges {
+        #[allow(clippy::cast_precision_loss)]
+        let base = ridge.0 as f32 * spacing;
+        transform.translation.y =
+            (base + scroll).rem_euclid(POWER_BAR_HEIGHT) - POWER_BAR_HEIGHT / 2.0;
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1771,55 +1886,52 @@ mod tests {
     }
 
     #[test]
-    fn separate_controls_keep_aim_and_power_independent_and_safe() {
+    fn table_aim_and_power_stay_independent_and_safe() {
         for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
             let scale = (size / DESIGN_SIZE).min_element();
             let bar = size / 2.0 + Vec2::new(POWER_BAR_X, 0.0) * scale;
+            let roller = size / 2.0 + Vec2::new(FINE_AIM_X, 0.0) * scale;
+            assert_eq!(classify_pointer_contact(bar, size), PointerContact::Power);
             assert_eq!(
-                classify_pointer_contact(bar, size, 1),
-                PointerContact::Power
+                classify_pointer_contact(roller, size),
+                PointerContact::FineAim
             );
-            assert_eq!(classify_pointer_contact(bar, size, 0), PointerContact::Aim);
+            assert_eq!(
+                classify_pointer_contact(size / 2.0, size),
+                PointerContact::Aim
+            );
             let cue_ball = Vec2::new(-55.0, 0.0);
+            let start = Vec2::new(-55.0, 200.0);
             let mut input = PrototypeInput {
-                contact_mode: 1,
                 pointer_contact: PointerContact::Aim,
-                drag_origin: Some(Vec2::new(-165.0, 0.0)),
+                drag_origin: Some(start),
+                drag_last: Some(start),
                 ..Default::default()
             };
-            let left = size / 2.0 + Vec2::new(-165.0, 0.0) * scale;
-            // Contact position, not displacement, controls aim. Pressing on the
-            // left of the cue ball immediately points left, even without motion.
-            update_from_pointer(&mut input, left, size, Some(cue_ball), &mut false);
-            assert!((input.aim_angle.abs() - std::f32::consts::PI).abs() < 0.001);
+            let initial = input.aim_angle;
+            // Pressing does not move the aim; only motion around the ball does.
             update_from_pointer(
                 &mut input,
-                left + Vec2::new(25.0, 0.0) * scale,
+                size / 2.0 + Vec2::new(start.x, -start.y) * scale,
                 size,
                 Some(cue_ball),
                 &mut false,
             );
-            assert!((input.aim_angle.abs() - std::f32::consts::PI).abs() < 0.001);
+            assert!((input.aim_angle - initial).abs() < 0.001);
             update_from_pointer(
                 &mut input,
-                size / 2.0 + Vec2::new(55.0, 0.0) * scale,
+                size / 2.0 + Vec2::new(45.0, -200.0) * scale,
                 size,
                 Some(cue_ball),
                 &mut false,
             );
-            assert!(input.aim_angle.abs() < 0.001);
+            assert!(
+                input.aim_angle < initial,
+                "moving clockwise turns the cue clockwise"
+            );
             assert!(input.power.abs() < f32::EPSILON);
             assert!(!contact_is_charged(&input));
             let angle = input.aim_angle;
-            // Crossing the cue ball's center holds the last valid direction.
-            update_from_pointer(
-                &mut input,
-                size / 2.0 + cue_ball * scale,
-                size,
-                Some(cue_ball),
-                &mut false,
-            );
-            assert!((input.aim_angle - angle).abs() < f32::EPSILON);
             input.pointer_contact = PointerContact::Power;
             input.drag_origin = Some(Vec2::new(POWER_BAR_X, 0.0));
             update_from_pointer(
@@ -1864,30 +1976,112 @@ mod tests {
     }
 
     #[test]
-    fn drag_updates_aim_and_power_together_at_multiple_viewports() {
-        for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
-            let origin = size / 2.0;
-            let mut input = PrototypeInput {
-                pointer_contact: PointerContact::Aim,
-                drag_origin: Some(Vec2::ZERO),
-                ..Default::default()
-            };
-            let scale = (size / DESIGN_SIZE).min_element();
-            update_drag(&mut input, origin + Vec2::new(-100.0, 0.0) * scale, size);
-            let first = input.power;
-            assert!((input.aim_angle).abs() < 0.001);
-            assert!(first > 0.0);
-            update_drag(&mut input, origin + Vec2::new(0.0, 60.0) * scale, size);
-            assert!((input.aim_angle - std::f32::consts::FRAC_PI_2).abs() < 0.001);
-            assert!(input.power < first);
-            update_drag(&mut input, origin, size);
-            assert!(input.power.abs() < f32::EPSILON);
-            update_drag(&mut input, origin + Vec2::new(500.0, 0.0) * scale, size);
-            assert!((input.power - 1.0).abs() < f32::EPSILON);
-            input.release_active_touch(true);
-            assert!(input.drag_origin.is_none());
-            assert!(input.power.abs() < f32::EPSILON);
+    fn rotation_is_the_same_in_front_of_or_behind_the_ball() {
+        let cue_ball = Vec2::new(30.0, -20.0);
+        // The same counter-clockwise sweep around the ball, once ahead of it
+        // and once behind it on the cue, turns the cue the same way.
+        let ahead = rotation_delta(
+            cue_ball + Vec2::new(200.0, 0.0),
+            cue_ball + Vec2::new(200.0, 20.0),
+            cue_ball,
+        );
+        let behind = rotation_delta(
+            cue_ball + Vec2::new(-200.0, 0.0),
+            cue_ball + Vec2::new(-200.0, -20.0),
+            cue_ball,
+        );
+        assert!(ahead > 0.0 && behind > 0.0);
+        assert!((ahead - behind).abs() < 1e-5);
+    }
+
+    #[test]
+    fn farther_from_the_ball_turns_more_finely() {
+        let cue_ball = Vec2::ZERO;
+        let near = rotation_delta(Vec2::new(100.0, 0.0), Vec2::new(100.0, 10.0), cue_ball);
+        let far = rotation_delta(Vec2::new(400.0, 0.0), Vec2::new(400.0, 10.0), cue_ball);
+        assert!(near > far && far > 0.0);
+    }
+
+    #[test]
+    fn passing_over_the_ball_cannot_whip_the_cue() {
+        let cue_ball = Vec2::ZERO;
+        // Half a turn around the ball very close to it is heavily damped.
+        let close = rotation_delta(Vec2::new(4.0, 0.0), Vec2::new(-4.0, 0.1), cue_ball);
+        assert!(close.abs() < std::f32::consts::PI * 4.0 / MIN_AIM_LEVER + 0.01);
+        assert!(rotation_delta(Vec2::ZERO, Vec2::new(5.0, 5.0), cue_ball).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_drag_that_returns_leaves_the_aim_unchanged() {
+        let cue_ball = Vec2::ZERO;
+        let mut input = PrototypeInput {
+            drag_last: Some(Vec2::new(300.0, 0.0)),
+            ..Default::default()
+        };
+        let initial = input.aim_angle;
+        for point in [
+            Vec2::new(250.0, 120.0),
+            Vec2::new(150.0, 200.0),
+            Vec2::new(260.0, 90.0),
+            Vec2::new(300.0, 0.0),
+        ] {
+            rotate_aim(&mut input, point, cue_ball);
+            input.drag_last = Some(point);
         }
+        assert!((input.aim_angle - initial).abs() < 1e-4);
+    }
+
+    #[test]
+    fn aim_wraps_cleanly_past_a_half_turn() {
+        let mut input = PrototypeInput {
+            aim_angle: std::f32::consts::PI - 0.01,
+            drag_last: Some(Vec2::new(0.0, 300.0)),
+            ..Default::default()
+        };
+        rotate_aim(&mut input, Vec2::new(-30.0, 300.0), Vec2::ZERO);
+        assert!(input.aim_angle > -std::f32::consts::PI && input.aim_angle < 0.0);
+        assert!((wrap_angle(std::f32::consts::PI) - std::f32::consts::PI).abs() < f32::EPSILON);
+        assert!((wrap_angle(-std::f32::consts::PI) - std::f32::consts::PI).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_quick_tap_points_and_a_drag_does_not() {
+        let cue_ball = Vec2::new(-55.0, 0.0);
+        let mut input = PrototypeInput {
+            pointer_contact: PointerContact::Aim,
+            drag_origin: Some(Vec2::new(-55.0, 150.0)),
+            drag_started_at: 10.0,
+            ..Default::default()
+        };
+        assert!(contact_is_tap(&input, 10.2));
+        assert!(!contact_is_tap(&input, 10.0 + TAP_MAX_SECONDS + 0.01));
+        point_aim_at(&mut input, Vec2::new(-55.0, 150.0), cue_ball);
+        assert!((input.aim_angle - std::f32::consts::FRAC_PI_2).abs() < 0.001);
+        input.drag_travel = TAP_SLOP + 1.0;
+        assert!(!contact_is_tap(&input, 10.1));
+        // Tapping the cue ball itself has no direction and keeps the aim.
+        let angle = input.aim_angle;
+        point_aim_at(&mut input, cue_ball, cue_ball);
+        assert!((input.aim_angle - angle).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn roller_turns_slowly_and_up_is_counter_clockwise() {
+        let mut input = PrototypeInput {
+            pointer_contact: PointerContact::FineAim,
+            drag_origin: Some(Vec2::new(FINE_AIM_X, 0.0)),
+            drag_last: Some(Vec2::new(FINE_AIM_X, 0.0)),
+            ..Default::default()
+        };
+        let initial = input.aim_angle;
+        fine_tune_aim(&mut input, Vec2::new(FINE_AIM_X, 100.0));
+        let turned = input.aim_angle - initial;
+        assert!(100.0f32.mul_add(-FINE_AIM_RADIANS_PER_UNIT, turned).abs() < 1e-6);
+        assert!(
+            turned.to_degrees() < 5.0,
+            "a long roller drag is a small turn"
+        );
+        assert!(!contact_is_charged(&input));
     }
 
     #[test]

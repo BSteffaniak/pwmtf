@@ -109,8 +109,6 @@ pub fn draw(
     #[cfg(target_arch = "wasm32")]
     let mut preview_input = crate::PrototypeInput::default();
     #[cfg(target_arch = "wasm32")]
-    let has_remote = remote.is_some();
-    #[cfg(target_arch = "wasm32")]
     let input = if let Some(preview) = remote {
         preview_input.aim_angle = f32::from(preview.aim.steps()) * std::f32::consts::TAU
             / f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN);
@@ -137,14 +135,7 @@ pub fn draw(
     if input.placing_cue_ball {
         return;
     }
-    #[cfg(target_arch = "wasm32")]
-    let show_power_stroke = has_remote || crate::shot_control_mode() == 1;
-    #[cfg(not(target_arch = "wasm32"))]
-    let show_power_stroke = crate::shot_control_mode() == 1;
-    if enabled
-        && show_power_stroke
-        && let Some(&origin) = presentation.target.get(&0)
-    {
+    if enabled && let Some(&origin) = presentation.target.get(&0) {
         let direction = Vec2::from_angle(input.aim_angle);
         let segments: Vec<_> = pwmtf_game_domain::TableGeometry::standard()
             .cushion_segments()
@@ -169,7 +160,7 @@ pub fn draw(
         }
     }
     let mode = MODE.load(Ordering::Relaxed);
-    if mode != 0 && !(show_power_stroke && input.power <= 0.0) {
+    if mode != 0 && input.power > 0.0 {
         let state = if sandbox.enabled {
             Some((
                 sandbox.table.clone(),
