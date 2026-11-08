@@ -30,6 +30,9 @@ pub enum Reconciliation {
     Corrected,
     /// Snapshot advanced state without a local prediction.
     Advanced,
+    /// Authority resolved a pending shot that was never resolved locally;
+    /// shot playback was the presentation, so nothing is interpolated.
+    Adopted,
 }
 
 /// Browser-side prediction state. It never accepts or decides gameplay.
@@ -39,6 +42,10 @@ pub struct PredictionState {
     predicted: MatchState,
     pending: Option<CommandId>,
     pending_playback_ticks: u32,
+    /// A pending shot whose outcome has not been simulated yet. Shots are
+    /// sent and played back immediately; resolving them up front would
+    /// stall the release frame.
+    deferred: Option<VersionedMatchCommand>,
     interpolation: Vec<BallSample>,
 }
 
@@ -57,6 +64,7 @@ impl PredictionState {
             authoritative,
             pending: None,
             pending_playback_ticks: 0,
+            deferred: None,
             interpolation: Vec::new(),
         })
     }
@@ -147,13 +155,46 @@ impl PredictionState {
         shot: VersionedShotCommand,
         called_pocket: Option<pwmtf_game_domain::PocketId>,
     ) -> Result<CommandEnvelope, PredictionError> {
-        self.predict_command(
+        if self.pending.is_some() {
+            return Err(PredictionError::PendingCommand);
+        }
+        if !matches!(
+            self.predicted.status(),
+            pwmtf_game_domain::MatchStatus::InProgress
+        ) {
+            return Err(MatchError::Completed.into());
+        }
+        let command = VersionedMatchCommand::new(MatchCommand::PlayShot {
+            shot,
+            called_pocket,
+        });
+        // The shot is sent and played back at once; its rules outcome is
+        // simulated only if it is still needed after playback (see
+        // `settle_deferred`). The server's state normally arrives first.
+        self.pending = Some(command_id);
+        self.pending_playback_ticks = 0;
+        self.deferred = Some(command);
+        Ok(CommandEnvelope::new(
+            self.authoritative_revision,
             command_id,
-            VersionedMatchCommand::new(MatchCommand::PlayShot {
-                shot,
-                called_pocket,
-            }),
-        )
+            command,
+        ))
+    }
+
+    /// Resolves a deferred shot's predicted outcome, when presentation needs
+    /// it before the server's state arrives.
+    pub fn settle_deferred(&mut self) {
+        if let Some(command) = self.deferred.take()
+            && self.predicted.apply_command(command).is_err()
+        {
+            self.predicted = self.authoritative.clone();
+        }
+    }
+
+    /// Returns whether a pending shot has not been resolved locally yet.
+    #[must_use]
+    pub const fn has_deferred(&self) -> bool {
+        self.deferred.is_some()
     }
 
     /// Predicts an authoritative cue-ball placement command locally.
@@ -211,7 +252,12 @@ impl PredictionState {
             };
         }
         let had_pending = self.pending.take().is_some();
-        let disposition = if had_pending && self.predicted.checksum() == next.checksum() {
+        // A deferred shot was never resolved locally; the server's state is
+        // adopted directly, with playback having been the presentation.
+        let deferred = self.deferred.take().is_some();
+        let disposition = if had_pending && deferred {
+            Reconciliation::Adopted
+        } else if had_pending && self.predicted.checksum() == next.checksum() {
             Reconciliation::Confirmed
         } else if had_pending || self.predicted.checksum() != next.checksum() {
             Reconciliation::Corrected
@@ -233,6 +279,7 @@ impl PredictionState {
     pub fn abandon_prediction(&mut self) {
         self.predicted = self.authoritative.clone();
         self.pending = None;
+        self.deferred = None;
         self.interpolation.clear();
     }
 }
@@ -412,6 +459,9 @@ mod tests {
             assert_eq!(journal.record_count(), 1);
 
             let authoritative_one = server_snapshot(&server);
+            // Resolving the deferred shot locally reproduces the server exactly.
+            assert!(shooter.has_deferred());
+            shooter.settle_deferred();
             assert_eq!(
                 shooter.reconcile(&authoritative_one).unwrap(),
                 Reconciliation::Confirmed
@@ -600,11 +650,13 @@ mod tests {
             .unwrap();
         let snapshot =
             SnapshotEnvelope::new(1, authority.checksum(), authority.to_bytes()).unwrap();
+        // The pending shot was never resolved locally, so authority is adopted.
         assert_eq!(
             prediction.reconcile(&snapshot).unwrap(),
-            Reconciliation::Corrected
+            Reconciliation::Adopted
         );
         assert_eq!(prediction.predicted(), &authority);
+        assert!(!prediction.has_deferred());
         assert_eq!(
             prediction.reconcile(&initial()).unwrap_err().to_string(),
             PredictionError::StaleSnapshot.to_string()

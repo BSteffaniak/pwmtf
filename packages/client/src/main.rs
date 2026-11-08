@@ -38,6 +38,14 @@ const BALL_RADIUS: f32 = {
 };
 const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_BAR_X: f32 = 565.0;
+/// Width of the drawn power fill.
+const POWER_BAR_WIDTH: f32 = 44.0;
+/// Half the dark track drawn behind the fill.
+const POWER_TRACK_HALF_WIDTH: f32 = POWER_BAR_WIDTH / 2.0 + 6.0;
+/// Left edge of the POWER touch zone: just past the table's right rail.
+const POWER_ZONE_LEFT: f32 = TABLE_CENTER_X + TABLE_SIZE.x / 2.0 + CUSHION + 4.0;
+/// How far above and below the drawn bar a press still counts as POWER.
+const POWER_ZONE_SLACK: f32 = 70.0;
 /// Fine-tune roller on the side opposite POWER, so pulling a shot never
 /// brushes it; in design units.
 const FINE_AIM_X: f32 = -567.0;
@@ -49,8 +57,9 @@ const _: () = {
     let table_right = TABLE_CENTER_X + TABLE_SIZE.x / 2.0 + CUSHION;
     assert!(FINE_AIM_X - 26.0 >= -DESIGN_SIZE.x / 2.0);
     assert!(FINE_AIM_X + 26.0 < table_left);
-    assert!(POWER_BAR_X - 32.0 > table_right);
-    assert!(POWER_BAR_X + 32.0 <= DESIGN_SIZE.x / 2.0 + 1.0);
+    assert!(POWER_ZONE_LEFT > table_right);
+    assert!(POWER_BAR_X - POWER_TRACK_HALF_WIDTH > POWER_ZONE_LEFT);
+    assert!(POWER_BAR_X + POWER_TRACK_HALF_WIDTH <= DESIGN_SIZE.x / 2.0);
 };
 /// Aim turn per design unit dragged along the roller (about 0.034°).
 const FINE_AIM_RADIANS_PER_UNIT: f32 = 0.0006;
@@ -647,14 +656,14 @@ fn setup(
 
     spawn_rectangle(
         &mut commands,
-        Vec2::new(42.0, POWER_BAR_HEIGHT + 14.0),
+        Vec2::new(POWER_TRACK_HALF_WIDTH * 2.0, POWER_BAR_HEIGHT + 14.0),
         Color::srgba(0.02, 0.02, 0.02, 0.72),
         Vec3::new(565.0, 0.0, 5.0),
     );
     commands.spawn((
         Sprite::from_color(
             Color::srgb(0.94, 0.58, 0.10),
-            Vec2::new(30.0, POWER_BAR_HEIGHT * DEFAULT_POWER),
+            Vec2::new(POWER_BAR_WIDTH, POWER_BAR_HEIGHT * DEFAULT_POWER),
         ),
         Transform::from_xyz(565.0, POWER_BAR_HEIGHT * (DEFAULT_POWER - 1.0) / 2.0, 6.0),
         PowerFill,
@@ -1117,11 +1126,13 @@ fn pointer_world(cursor: Vec2, size: Vec2) -> Vec2 {
     Vec2::new(cursor.x - size.x / 2.0, size.y / 2.0 - cursor.y) / scale
 }
 
+/// Everything right of the table's rail, near the bar's height, is POWER, so
+/// a press that misses the drawn bar charges power instead of aiming.
 fn pointer_on_power_bar(cursor: Vec2, size: Vec2) -> bool {
     let position = pointer_world(cursor, size);
     position.is_finite()
-        && (position.x - POWER_BAR_X).abs() <= 32.0
-        && position.y.abs() <= POWER_BAR_HEIGHT / 2.0 + 14.0
+        && position.x > POWER_ZONE_LEFT
+        && position.y.abs() <= POWER_BAR_HEIGHT / 2.0 + POWER_ZONE_SLACK
 }
 
 fn pointer_on_fine_aim(cursor: Vec2, size: Vec2) -> bool {
@@ -1751,7 +1762,7 @@ fn update_aim(
     **cue = cue_transform(cue_ball, angle, strength);
 
     let fill_height = POWER_BAR_HEIGHT * strength;
-    power.0.custom_size = Some(Vec2::new(30.0, fill_height));
+    power.0.custom_size = Some(Vec2::new(POWER_BAR_WIDTH, fill_height));
     power.1.translation.y = (fill_height - POWER_BAR_HEIGHT) / 2.0;
 
     #[allow(clippy::cast_precision_loss)]
@@ -2053,6 +2064,36 @@ mod tests {
             assert!(!contact_is_charged(&input));
             input.release_active_touch(true);
             assert!(!contact_is_charged(&input));
+        }
+    }
+
+    #[test]
+    fn near_misses_of_the_power_bar_still_charge_power() {
+        for size in [
+            Vec2::new(1280.0, 634.0),
+            Vec2::new(844.0, 342.0),
+            Vec2::new(1600.0, 500.0),
+        ] {
+            let scale = (size / DESIGN_SIZE).min_element();
+            let at = |x: f32, y: f32| size / 2.0 + Vec2::new(x, -y) * scale;
+            for (x, y) in [
+                (POWER_BAR_X, 0.0),
+                (POWER_BAR_X - 45.0, 40.0),
+                (POWER_BAR_X + 40.0, -60.0),
+                (POWER_BAR_X, POWER_BAR_HEIGHT / 2.0 + 50.0),
+            ] {
+                assert_eq!(
+                    classify_pointer_contact(at(x, y), size),
+                    PointerContact::Power,
+                    "({x}, {y}) at {size:?}"
+                );
+            }
+            // The right rail itself still starts an aim drag.
+            let rail = TABLE_CENTER_X + TABLE_SIZE.x / 2.0 + CUSHION / 2.0;
+            assert_eq!(
+                classify_pointer_contact(at(rail, 0.0), size),
+                PointerContact::Aim
+            );
         }
     }
 

@@ -23,6 +23,8 @@ use crate::prediction::{PredictionError, PredictionState};
 
 /// First reconnect delay after a failure.
 pub const RETRY_BASE_MS: f64 = 250.0;
+/// Longest stretch of a shot played back in one frame.
+pub const MAX_PLAYBACK_FRAME_MS: f64 = 50.0;
 /// Upper bound on the exponential reconnect delay.
 pub const RETRY_MAX_MS: f64 = 30_000.0;
 /// Interval between client pings while ready.
@@ -186,6 +188,9 @@ struct MatchSession {
     /// The local player's 8-ball call, valid only for the revision it was made at.
     called_pocket: Option<(u64, PocketId)>,
     last_shot: Option<ShotSummary>,
+    /// An accepted shot to summarize once its playback has finished, so the
+    /// replay never competes with rendering the shot.
+    unsummarized: Option<(MatchState, pwmtf_game_domain::VersionedMatchCommand, u64)>,
     /// Where every screen starts the cue this turn: the aim of the shot that
     /// led here, carried across placements and timeouts.
     turn_aim: Option<(u64, pwmtf_game_domain::Aim)>,
@@ -193,6 +198,20 @@ struct MatchSession {
 }
 
 impl MatchSession {
+    /// Work deferred while a shot played back: the summary of an accepted
+    /// shot, and the local outcome of our own shot if the server has not
+    /// answered yet. Run only when the table is still.
+    fn summarize_settled_shot(&mut self) {
+        if let Some((before, command, revision)) = self.unsummarized.take() {
+            self.last_shot = ShotSummary::replay(&before, command, revision);
+        }
+        if self.pending.is_some()
+            && let Some(prediction) = self.prediction.as_mut()
+        {
+            prediction.settle_deferred();
+        }
+    }
+
     const fn new(match_id: u128) -> Self {
         Self {
             match_id,
@@ -202,6 +221,7 @@ impl MatchSession {
             pending: None,
             called_pocket: None,
             last_shot: None,
+            unsummarized: None,
             turn_aim: None,
             playback: None,
         }
@@ -614,16 +634,21 @@ impl SessionTransport {
                         .map(|(_, aim)| (message.revision, aim)),
                     _ => None,
                 };
-                session.last_shot = message
+                session.unsummarized = message
                     .last_command
                     .filter(|_| message.revision == local + 1)
-                    .and_then(|last| {
-                        ShotSummary::replay(
-                            prediction.authoritative(),
+                    .map(|last| {
+                        (
+                            prediction.authoritative().clone(),
                             last.command,
                             message.revision,
                         )
                     });
+                // Without a command id, recognizing our own shot needs its
+                // resolved outcome; this reconnect path is rare.
+                if message.last_command.is_none() && session.pending.is_some() {
+                    prediction.settle_deferred();
+                }
                 let ours = session.pending.is_some_and(|pending| {
                     message.last_command.map_or_else(
                         || {
@@ -673,6 +698,11 @@ impl SessionTransport {
         }
         if revision_changed {
             self.previews.clear_remote();
+        }
+        if let Some(session) = self.session.as_mut()
+            && session.playback.is_none()
+        {
+            session.summarize_settled_shot();
         }
         if superseded {
             self.emit_rejection(message.match_id, "superseded");
@@ -846,8 +876,9 @@ impl SessionTransport {
             authority.table().clone(),
         );
         let envelope = prediction.predict_shot(command_id, shot, called_pocket)?;
-        let ticks = prediction.pending_playback_ticks();
-        session.playback = ShotPlayback::start(physics, geometry, table, shot, Some(ticks))
+        // Plays until the balls settle, which canonical physics makes
+        // identical to the server's tick count.
+        session.playback = ShotPlayback::start(physics, geometry, table, shot, None)
             .ok()
             .filter(|playback| !playback.is_finished());
         self.playback_clock = None;
@@ -944,15 +975,18 @@ impl SessionTransport {
     /// Returns `true` exactly once when a playback finishes or is cut short,
     /// so presentation snaps to the authoritative state.
     pub fn advance_playback(&mut self, now: f64) -> bool {
-        let elapsed = self
-            .playback_clock
-            .map_or(0.0, |previous| (now - previous).max(0.0));
+        // A slow frame delays the shot slightly instead of skipping ahead,
+        // so the strike and first collisions are always seen.
+        let elapsed = self.playback_clock.map_or(0.0, |previous| {
+            (now - previous).clamp(0.0, MAX_PLAYBACK_FRAME_MS)
+        });
         self.playback_clock = Some(now);
         if let Some(session) = self.session.as_mut()
             && let Some(playback) = session.playback.as_mut()
             && playback.advance(elapsed / 1_000.0)
         {
             session.playback = None;
+            session.summarize_settled_shot();
             self.playback_finished = true;
             self.emit_match();
         }
@@ -1986,7 +2020,9 @@ mod tests {
         assert!(transport.is_playing(), "shooter playback starts at release");
         assert!(!transport.accepts_active_player_command());
         let (next, ticks) = accepted_shot(&state, 8_000);
-        assert_eq!(transport.playback().unwrap().limit(), ticks);
+        // Release does no up-front simulation; playback runs until the balls
+        // settle, which matches the server's tick count.
+        assert!(transport.prediction().unwrap().has_deferred());
         transport.receive(
             &state_frame(
                 &next,
@@ -2019,6 +2055,23 @@ mod tests {
         }
         assert!(finished);
         assert!(!transport.is_playing());
+        assert!(!transport.prediction().unwrap().has_deferred());
+    }
+
+    #[test]
+    fn a_slow_frame_delays_playback_instead_of_skipping_the_strike() {
+        let state = initial_state();
+        let mut transport = ready(Player::One, &state, 0);
+        transport
+            .submit_shot(CommandId::new([4; 16]), shot(8_000), None)
+            .unwrap();
+        transport.advance_playback(0.0);
+        // A two-second stall advances the shot by at most one capped frame.
+        transport.advance_playback(2_000.0);
+        let ticks_per_second = f64::from(PhysicsProfile::standard().ticks_per_second());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let cap = (MAX_PLAYBACK_FRAME_MS / 1_000.0 * ticks_per_second).ceil() as u32;
+        assert!(transport.playback().unwrap().table().tick() <= state.table().tick() + cap);
     }
 
     #[test]
@@ -2073,6 +2126,13 @@ mod tests {
         observer.take_events();
         observer.receive(&state_frame(&next, 1, Player::Two, Some(last)), 50.0);
         shooter.receive(&state_frame(&next, 1, Player::One, Some(last)), 50.0);
+        // The summary is computed once the observer's playback finishes.
+        observer.advance_playback(60.0);
+        let mut now = 60.0;
+        while observer.is_playing() {
+            now += 16.0;
+            observer.advance_playback(now);
+        }
         // The next turn starts with the cue where the shot left it, on both screens.
         assert_eq!(observer.turn_start_aim(), Some(shot(8_000).aim));
         assert_eq!(shooter.turn_start_aim(), Some(shot(8_000).aim));
