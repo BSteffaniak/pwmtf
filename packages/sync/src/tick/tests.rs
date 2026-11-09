@@ -283,6 +283,49 @@ fn zero_bounds_are_raised_to_one() {
 }
 
 #[test]
+fn a_spectator_asks_for_frames_lost_behind_its_jitter_buffer() {
+    let mut authority = authority_with(&[0]);
+    let mut spectator = TickReplica::<Dots>::from_snapshot(
+        &authority.snapshot(),
+        None,
+        TickReplicaConfig {
+            spectator_delay: 6,
+            ..replica_config()
+        },
+    )
+    .unwrap();
+    let frames: Vec<_> = (0..14).map(|_| authority.advance()).collect();
+    // Frames 0..=5 arrive (the jitter buffer), 6..=8 are lost, 9.. arrive.
+    for frame in frames[..6].iter().chain(&frames[9..]) {
+        spectator.receive(frame.clone());
+    }
+    assert_eq!(
+        spectator.advance(None).confirmed,
+        0,
+        "the buffer is still filling"
+    );
+    assert_eq!(
+        spectator.request(),
+        Some(ReplicaRequest::Frames {
+            from: frames[6].tick
+        }),
+        "the hole is reported even though the confirmed tick is buffered"
+    );
+    for frame in authority.frames_from(frames[6].tick).unwrap() {
+        spectator.receive(frame);
+    }
+    assert_eq!(spectator.request(), None);
+    let mut confirmed = 0;
+    for _ in 0..20 {
+        confirmed += spectator.advance(None).confirmed;
+    }
+    assert!(
+        confirmed >= 8,
+        "presentation resumes once the hole is filled"
+    );
+}
+
+#[test]
 fn spectator_converges_from_a_snapshot_after_its_jitter_buffer() {
     let mut authority = authority_with(&[0, 1]);
     for tick in 1..10 {

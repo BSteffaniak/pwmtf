@@ -238,9 +238,20 @@ impl<G: TickGame> TickReplica<G> {
         if self.desynced || self.overflowed {
             return Some(ReplicaRequest::Snapshot);
         }
-        let gap = !self.buffered.is_empty() && !self.buffered.contains_key(&self.confirmed_tick);
+        // A hole anywhere after the contiguous run (not only at the confirmed
+        // tick): a spectator's jitter buffer can hold frames before the hole.
+        let contiguous = self.contiguous_frames();
+        let gap = self
+            .buffered
+            .last_key_value()
+            .is_some_and(|(last, _)| *last >= self.confirmed_tick + contiguous);
         let starved = self.local.is_some() && self.predicted.len() as u64 >= self.horizon();
-        (gap || starved).then_some(ReplicaRequest::Frames {
+        if gap {
+            return Some(ReplicaRequest::Frames {
+                from: self.confirmed_tick + contiguous,
+            });
+        }
+        starved.then_some(ReplicaRequest::Frames {
             from: self.confirmed_tick,
         })
     }
@@ -321,9 +332,8 @@ impl<G: TickGame> TickReplica<G> {
         }
     }
 
-    /// How many contiguous frames a spectator presents this tick: none while
-    /// the jitter buffer fills, one in steady state, more to catch up.
-    fn spectator_frames(&self) -> u64 {
+    /// Buffered frames contiguous from the confirmed tick.
+    fn contiguous_frames(&self) -> u64 {
         let mut available = 0;
         while self
             .buffered
@@ -331,6 +341,13 @@ impl<G: TickGame> TickReplica<G> {
         {
             available += 1;
         }
+        available
+    }
+
+    /// How many contiguous frames a spectator presents this tick: none while
+    /// the jitter buffer fills, one in steady state, more to catch up.
+    fn spectator_frames(&self) -> u64 {
+        let available = self.contiguous_frames();
         let delay = self.config.spectator_delay;
         if available <= delay {
             0
