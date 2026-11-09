@@ -5,10 +5,14 @@
 //!
 //! A [`World`] holds dynamic discs (pucks, balls, carts), kinematic discs
 //! driven toward a target at a bounded speed (pointer-driven mallets, rods),
-//! static wall segments and sensor regions. [`World::step`] advances exactly
-//! one fixed tick, splitting it into enough substeps that no body moves more
-//! than half its radius per substep, and reports contact and sensor events in
-//! a canonical order.
+//! static wall segments and sensor regions. Shaped bodies
+//! ([`World::add_shaped_body`]) add oriented boxes, capsules and compounds of
+//! several parts with rotation, kinematic angle control (foosball rods,
+//! pinball flippers), steering drives (bumper carts) and bumper kicks; a
+//! world-wide or regional acceleration field tilts the table (pinball,
+//! marble lanes). [`World::step`] advances exactly one fixed tick, splitting
+//! it into enough substeps that no body moves more than half its thickness
+//! per substep, and reports contact and sensor events in a canonical order.
 //!
 //! All state is integers: distances in micro-units (one table unit, such as a
 //! metre, is [`MICROS_PER_UNIT`]), velocities in micro-units per second,
@@ -17,8 +21,13 @@
 //! crate depends on no renderer, transport, persistence or identity.
 
 mod codec;
+mod contact;
+mod shape;
+mod trig;
 mod world;
 
+#[cfg(test)]
+mod shape_tests;
 #[cfg(test)]
 mod tests;
 
@@ -26,7 +35,12 @@ use std::ops::{Add, Neg, Sub};
 
 use thiserror::Error;
 
-pub use codec::{DecodeError, WORLD_STATE_VERSION};
+pub use codec::{DISC_WORLD_STATE_VERSION, DecodeError, WORLD_STATE_VERSION};
+pub use shape::{
+    Attachment, Drive, FieldDef, MAX_ANGULAR_SPEED, MAX_EXTENT, MAX_PARTS, MAX_SURFACE_FRICTION,
+    Part, PartPose, Shape, ShapedBodyDef,
+};
+pub use trig::{PI_MICRORADIANS, TRIG_UNIT, TURN_MICRORADIANS, rotate, sin_cos, wrap_angle};
 pub use world::{Body, World};
 
 /// Micro-units in one table unit (for example, micrometres per metre).
@@ -41,7 +55,7 @@ pub const MAX_MAGNITUDE: i64 = 1_000_000_000_000;
 
 /// A two-dimensional integer vector: a position in micro-units or a velocity
 /// in micro-units per second.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Vector {
     /// Horizontal component.
     pub x: i64,
@@ -205,6 +219,10 @@ pub struct WallId(pub(crate) u16);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SensorId(pub(crate) u16);
 
+/// Identifies an acceleration field region by insertion order.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FieldId(pub(crate) u16);
+
 macro_rules! id_accessors {
     ($($id:ident),*) => {$(
         impl $id {
@@ -217,7 +235,7 @@ macro_rules! id_accessors {
     )*};
 }
 
-id_accessors!(BodyId, WallId, SensorId);
+id_accessors!(BodyId, WallId, SensorId, FieldId);
 
 /// Immutable world parameters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -404,6 +422,60 @@ pub enum Event {
         /// The body.
         body: BodyId,
     },
+    /// Detail of a [`Event::BodyContact`] involving a shaped body: which
+    /// parts touched, where and along which normal. Merged per part pair
+    /// within a tick, keeping the fastest.
+    PartContact {
+        /// The lower-indexed body.
+        first: BodyId,
+        /// The part of `first` (zero for a plain disc).
+        first_part: u8,
+        /// The higher-indexed body.
+        second: BodyId,
+        /// The part of `second` (zero for a plain disc).
+        second_part: u8,
+        /// The contact point in micro-units.
+        point: Vector,
+        /// The unit contact normal from `first` toward `second`, scaled by
+        /// [`TRIG_UNIT`].
+        normal: Vector,
+        /// Approach speed along the normal at the contact point, micro-units
+        /// per second.
+        speed: i64,
+    },
+    /// Detail of a [`Event::WallContact`] of a shaped body. Merged per part
+    /// and wall within a tick, keeping the fastest.
+    PartWallContact {
+        /// The body.
+        body: BodyId,
+        /// The part that touched.
+        part: u8,
+        /// The wall.
+        wall: WallId,
+        /// The contact point in micro-units.
+        point: Vector,
+        /// The unit normal from the wall toward the body, scaled by
+        /// [`TRIG_UNIT`].
+        normal: Vector,
+        /// Approach speed along the normal, micro-units per second.
+        speed: i64,
+    },
+    /// A kicking part fired: a dynamic body started touching it and was
+    /// kicked away. Fires once per contact; the body must separate before it
+    /// can fire again.
+    Bumped {
+        /// The kinematic body owning the kicking part.
+        bumper: BodyId,
+        /// The kicking part.
+        part: u8,
+        /// The dynamic body kicked.
+        body: BodyId,
+        /// The unit kick direction from the bumper toward the body, scaled
+        /// by [`TRIG_UNIT`].
+        normal: Vector,
+        /// The speed added, micro-units per second.
+        speed: i64,
+    },
 }
 
 /// What one [`World::step`] did.
@@ -414,8 +486,10 @@ pub struct StepReport {
     /// Substeps used.
     pub substeps: u8,
     /// Events in canonical order: by the substep of first occurrence, then
-    /// within a substep body contacts (by index pair), wall contacts (by
-    /// body, then wall) and sensor changes (by sensor, then body).
+    /// within a substep body contacts (by index pair, each followed by its
+    /// part details and kicks in part order), wall contacts (by body, then
+    /// wall, each followed by its part details) and sensor changes (by
+    /// sensor, then body).
     pub events: Vec<Event>,
 }
 
@@ -446,8 +520,9 @@ pub enum WorldError {
     /// A wall has zero length.
     #[error("wall has zero length")]
     DegenerateWall,
-    /// The world already holds the most bodies, walls or sensors (65 535).
-    #[error("too many bodies, walls or sensors")]
+    /// The world already holds the most bodies, walls, sensors or fields
+    /// (65 535).
+    #[error("too many bodies, walls, sensors or fields")]
     Capacity,
     /// No such body.
     #[error("unknown body")]
@@ -455,6 +530,16 @@ pub enum WorldError {
     /// The operation needs a kinematic body.
     #[error("body is not kinematic")]
     NotKinematic,
+    /// The operation needs a shaped body (added by
+    /// [`World::add_shaped_body`]).
+    #[error("body is not shaped")]
+    NotShaped,
+    /// No such wall.
+    #[error("unknown wall")]
+    UnknownWall,
+    /// No such acceleration field.
+    #[error("unknown field")]
+    UnknownField,
 }
 
 pub(crate) const fn check_vector(vector: Vector) -> Result<Vector, WorldError> {

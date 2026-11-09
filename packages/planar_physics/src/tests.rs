@@ -1,6 +1,6 @@
 use crate::{
-    Aabb, BodyDef, BodyId, BodyKind, DecodeError, Event, MICROS_PER_UNIT, MILLIONTHS, Region,
-    SensorDef, Vector, WORLD_STATE_VERSION, WallDef, World, WorldConfig, WorldError,
+    Aabb, BodyDef, BodyId, BodyKind, DISC_WORLD_STATE_VERSION, DecodeError, Event, MICROS_PER_UNIT,
+    MILLIONTHS, Region, SensorDef, Vector, WallDef, World, WorldConfig, WorldError,
 };
 
 const M: i64 = MICROS_PER_UNIT;
@@ -475,7 +475,8 @@ fn encoding_round_trips_and_continues_identically() {
     let (mut world, ids) = scrimmage();
     run_scrimmage(&mut world, ids, 3, 500);
     let bytes = world.to_bytes();
-    assert_eq!(bytes[..2], WORLD_STATE_VERSION.to_le_bytes());
+    // Plain-disc worlds keep the original encoding.
+    assert_eq!(bytes[..2], DISC_WORLD_STATE_VERSION.to_le_bytes());
     let mut restored = World::from_bytes(&bytes).unwrap();
     assert_eq!(restored, world);
     assert_eq!(restored.checksum(), world.checksum());
